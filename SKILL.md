@@ -139,6 +139,7 @@ issue-intake -> requirement-match -> triage-report -> fix-plan -> implementation
 - `assets/project-config.template.yaml`：通用项目级配置模板。
 - `assets/feishu-project-config.template.yaml`：飞书项目配置模板。
 - `assets/local-overrides.template.yaml`：本地用户覆盖配置模板。
+- `assets/promo-issue-triage-and-fix.png`：给团队介绍本技能时使用的宣传图。
 
 ## 安全规则
 
