@@ -1,0 +1,68 @@
+name: feishu-bugfix
+version: 1
+description: Artifact-guided workflow for Feishu-managed bug triage, repair, verification, and closure.
+
+root: .bugflow/issues
+
+artifacts:
+  - id: issue-intake
+    generates: issue.json
+    description: Normalized tracker issue with requirement links and raw source data.
+    requires: []
+  - id: requirement-match
+    generates: requirement-match.md
+    description: Requirement-to-repository mapping, confidence, and customer confirmation question when needed.
+    requires:
+      - issue-intake
+  - id: triage-report
+    generates: triage.md
+    description: Ownership, effort, readiness, risk, and repair ranking.
+    requires:
+      - requirement-match
+  - id: fix-plan
+    generates: fix-plan.md
+    description: Scoped implementation plan and verification plan before code edits.
+    requires:
+      - triage-report
+  - id: implementation
+    generates: implementation.md
+    description: Code changes, files touched, remote status changes, and implementation notes.
+    requires:
+      - fix-plan
+  - id: verification
+    generates: verification.md
+    description: Formatter, lint, tests, build, browser verification, evidence, and failures.
+    requires:
+      - implementation
+  - id: closure
+    generates: closure.md
+    description: Remote comment text, final status decision, residual risk, and follow-up.
+    requires:
+      - verification
+
+actions:
+  fetch:
+    creates:
+      - issue-intake
+  match:
+    creates:
+      - requirement-match
+  triage:
+    creates:
+      - triage-report
+  plan:
+    creates:
+      - fix-plan
+  apply:
+    creates:
+      - implementation
+  verify:
+    creates:
+      - verification
+  close:
+    creates:
+      - closure
+  update:
+    creates: []
+  status:
+    creates: []

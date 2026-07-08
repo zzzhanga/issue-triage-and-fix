@@ -1,0 +1,32 @@
+schema_version: 1
+
+# Optional local-only overrides. Keep this file out of git.
+# Do not duplicate repo-scoped status ids, field mappings, requirement mappings, or workflow rules here.
+
+extends:
+  - .codex/bugflow/issue-triage.project.yaml
+
+query_policy:
+  assigned_to: current_login_user()
+
+browser_verification:
+  app_url: http://localhost:5173
+
+login_policy:
+  method_priority:
+    - existing_browser_session
+    - manual_user_login
+    - env_test_account
+    - mock_token
+  test_account_env:
+    username: QIKAN_TEST_USERNAME
+    password: QIKAN_TEST_PASSWORD
+
+remote_status_policy:
+  # Users can make automation stricter locally, for example set update_status_allowed to false.
+  update_status_allowed: true
+  update_comments_allowed: true
+  default_change_to_in_progress: true
+  default_resolve_for_acceptance: false
+  default_complete: false
+  default_terminate: false

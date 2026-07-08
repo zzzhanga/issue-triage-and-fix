@@ -1,0 +1,188 @@
+schema_version: 1
+
+project:
+  name: example-project
+  repo_path: .
+  role_assumption: frontend
+  docs:
+    - AGENTS.md
+    - README.md
+
+issue_source:
+  platform: feishu-project
+  base_url: https://project.feishu.cn
+  project_key: example-key
+  work_item_type: issue
+  default_status: OPEN
+
+field_mapping:
+  id: work_item_id
+  number: auto_number
+  title: name
+  status: work_item_status
+  assignee: current_status_operator
+  priority: priority
+  description: description
+  requirements: requirement
+  attachments: attachments
+  updated_at: updated_at
+
+requirement_mapping:
+  enabled: true
+  issue_requirement_field: requirement
+  current_repo:
+    repo_key: current-repo
+    path: .
+    aliases:
+      - current repo
+      - admin
+  related_repositories: []
+  demand_rules: []
+  confirmation_policy:
+    confidence_threshold: 0.75
+    require_confirmation_when:
+      - no_requirement
+      - no_repo_match
+      - multiple_repo_match
+      - low_confidence
+
+bugflow:
+  enabled: true
+  root: .bugflow/issues
+  schema: .codex/bugflow/schema.yaml
+  commit_artifacts_by_default: false
+
+query_policy:
+  assigned_to: current_login_user()
+  status: OPEN
+  limit: 20
+  order_by: updated_at desc
+
+ownership_rules:
+  frontend_owned:
+    - UI layout
+    - CSS styles
+    - frontend routing
+    - tables
+    - forms
+    - modals
+    - drawers
+    - upload
+    - rich text
+    - mock data
+    - frontend API mapping
+  not_current_repo:
+    - backend API failure
+    - database cleanup
+    - permission configuration
+    - infrastructure
+    - another client application
+
+verification:
+  package_manager: pnpm
+  install: pnpm install
+  format_write: pnpm exec prettier --write <changed-files>
+  format_check: pnpm exec prettier --check <changed-files>
+  lint: pnpm exec eslint <changed-files>
+  stylelint: pnpm exec stylelint <changed-style-files>
+  test: ""
+  build: pnpm run build
+  run_build_by_default: false
+
+browser_verification:
+  enabled: true
+  dev_command: pnpm run dev
+  app_url: http://localhost:5173
+  required_for:
+    - style
+    - table
+    - modal
+    - drawer
+    - upload
+    - rich-text
+    - routing
+    - visible-interaction
+  routes: []
+
+login_policy:
+  method_priority:
+    - existing_browser_session
+    - manual_user_login
+    - env_test_account
+    - mock_token
+  never_request_password: true
+  allow_qr_login: true
+  test_account_env:
+    username: PROJECT_TEST_USERNAME
+    password: PROJECT_TEST_PASSWORD
+
+remote_status_policy:
+  update_status_allowed: false
+  update_comments_allowed: false
+  default_change_to_in_progress: false
+  default_resolve_for_acceptance: false
+  default_complete: false
+  default_terminate: false
+
+statuses:
+  open:
+    id: OPEN
+    label: 待修复
+  in_progress:
+    id:
+    label: 修复中
+  resolved_waiting_acceptance:
+    id:
+    label: 已解决，待验收
+  reopened:
+    id:
+    label: 重新打开
+  completed:
+    id:
+    label: 已完成
+  terminated:
+    id:
+    label: 已终止
+
+status_transitions:
+  start_fix:
+    from: open
+    to: in_progress
+    require_confirmation: false
+  resolve_for_acceptance:
+    from: in_progress
+    to: resolved_waiting_acceptance
+    require_confirmation: true
+  complete:
+    from: resolved_waiting_acceptance
+    to: completed
+    require_confirmation: true
+  reopen:
+    from: resolved_waiting_acceptance
+    to: reopened
+    require_confirmation: true
+  terminate:
+    to: terminated
+    require_confirmation: true
+
+execution_policy:
+  auto_fix_allowed: true
+  max_auto_fix_effort: medium
+  require_confirmation_for:
+    - hard
+    - blocked
+    - needs-confirmation
+    - not-current-repo
+    - backend-contract-change
+
+comment_template:
+  enabled: true
+  body: |
+    Fix summary:
+    - <summary>
+
+    Verification:
+    - <verification>
+
+    Residual risk:
+    - <risk>

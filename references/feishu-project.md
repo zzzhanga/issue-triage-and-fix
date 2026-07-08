@@ -1,0 +1,129 @@
+# Feishu Project Adapter
+
+Use this reference when `issue_source.platform` is `feishu-project` or the user provides a `project.feishu.cn` URL.
+
+## URL Parsing
+
+Parse URLs such as:
+
+```text
+https://project.feishu.cn/ai-rays/issue/homepage
+```
+
+In this example:
+
+- project key: `ai-rays`
+- work item type: `issue`
+
+If the URL is missing a project key or work item type, use repo-scoped project config. Ask only when neither source provides it.
+
+## Access Order
+
+1. Use an available Feishu Project MCP server.
+2. Use a project-approved OpenAPI script or SDK with credentials from environment variables.
+3. Use browser automation only for one-off extraction after user authorization.
+
+Do not ask for a password. Do not store tokens, cookies, MCP URLs, or user keys in the repository.
+
+## Field Discovery
+
+Use project config field mappings when present.
+
+If a query fails or the project differs from the known mapping:
+
+1. Fetch work item field config for the project and work item type.
+2. Confirm the status option id for the configured pending/open label.
+3. Confirm assignee/current-operator, requirement/demand, description, priority, attachment, and updated-time fields.
+4. Rebuild queries using field keys and option ids, not display labels.
+
+## Common Feishu Fields
+
+For `ai-rays.issue`, the historical mapping is:
+
+- work item type: `issue`
+- status field: `work_item_status`
+- pending status id: `OPEN` for label `待修复`
+- current operator field: `current_status_operator`
+- title field: `name`
+- description field: `description`
+- screenshot/recording field: `field_696151`
+- updated time field: `updated_at`
+- requirement/demand field: configure in `requirement_mapping.issue_requirement_field` after field discovery.
+
+Treat this as a default only. Project config overrides it.
+
+## Default MQL Shape
+
+Use this shape for "my pending issues" when the mapping matches:
+
+```sql
+SELECT `work_item_id`, `auto_number`, `name`, `current_status_operator`, `work_item_status`, `priority`, `description`, `field_696151`, `updated_at`
+FROM `PROJECT_KEY`.`WORK_ITEM_TYPE`
+WHERE array_contains(`current_status_operator`, current_login_user())
+  AND `work_item_status` = '<id:OPEN>'
+ORDER BY `updated_at` DESC
+LIMIT 20
+```
+
+Replace `PROJECT_KEY`, `WORK_ITEM_TYPE`, field names, status id, and limit from project config.
+
+Add the configured requirement/demand field to the SELECT list when available. If the list query omits linked requirements, fetch the full work item before repository matching.
+
+## Requirement Links
+
+Many Feishu Project bug lists show a linked requirement/demand column. Fetch it as a structured field when possible, not only as display text.
+
+Normalize linked requirements to:
+
+```json
+{
+  "id": "REQ-1",
+  "title": "Requirement title",
+  "url": "https://project.feishu.cn/..."
+}
+```
+
+When the requirement field key is unknown:
+
+1. Call field config discovery.
+2. Look for fields whose display label means `需求`, `关联需求`, `需求/项目`, or the team's custom demand field.
+3. Add the field key to `field_mapping.requirements` or `requirement_mapping.issue_requirement_field`.
+4. Fetch full issue detail before triage.
+
+## Common Status Labels
+
+The Feishu bug workflow may include these labels:
+
+- `待修复`
+- `修复中`
+- `已解决，待验收`
+- `重新打开`
+- `已完成`
+- `已终止`
+
+Only `OPEN` is a historically known id for `待修复` in some projects. Resolve every other status id from Feishu field config before status updates.
+
+## Status Updates
+
+Before changing status:
+
+- Read `status-workflow.md`.
+- Confirm the target status id from config or field schema.
+- Confirm the transition is allowed by project policy.
+- Include the issue id, old status, new status, and reason in the operation summary.
+
+Default safe behavior:
+
+- Moving `待修复` to `修复中`: allowed only when config enables `start_fix` and the target status id is known.
+- Moving to `已解决，待验收`, `已完成`, or `已终止`: require config permission or user approval.
+
+## Comments
+
+When remote comments are allowed, include:
+
+- what changed
+- verification commands
+- browser route and result when applicable
+- residual risk
+
+Do not paste secrets, full logs with tokens, or unrelated diffs into comments.
