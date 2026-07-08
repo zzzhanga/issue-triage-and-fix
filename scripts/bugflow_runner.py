@@ -289,6 +289,11 @@ def classify_issue(config: dict[str, Any], issue: dict[str, Any], match: dict[st
             risk = "medium"
             readiness = "manual-review-first"
             reason = "当前仓库可能相关，但描述包含接口/权限/数据等较高风险信号。"
+        if any(word in title_desc for word in ("定时", "发布日期", "发布时间", "发布日", "schedule")):
+            effort = "medium"
+            risk = "medium"
+            readiness = "manual-review-first"
+            reason = "当前仓库可能相关，但定时发布/发布日期通常依赖产品语义或后端字段约定，需先人工评审。"
     elif match_state in ("multi-repo-unclear", "low-confidence", "unmatched"):
         ownership = "needs-confirmation"
         effort = "blocked"
@@ -347,14 +352,23 @@ def render_triage(issue: dict[str, Any], match: dict[str, Any], triage: dict[str
 """
 
 
-def fetch_json(args: argparse.Namespace) -> int:
+def import_json_issues(args: argparse.Namespace) -> list[dict[str, Any]]:
     config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
     platform = config_value(config, "issue_source.platform", args.platform)
     root = Path(config_value(config, "bugflow.root", args.root))
     payload = load_json_payload(args.input)
     items = iter_payload_items(payload)
     normalized = [normalize_issue(item, platform, field_mapping(config)) for item in items]
-    directories = [str(write_issue_json(root, issue)) for issue in normalized]
+    for issue in normalized:
+        write_issue_json(root, issue)
+    return normalized
+
+
+def fetch_json(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    normalized = import_json_issues(args)
+    directories = [str(issue_dir(root, issue_key(issue))) for issue in normalized]
     result = {"count": len(normalized), "directories": directories}
     print(json.dumps(result, ensure_ascii=False, indent=2))
     return 0
@@ -412,6 +426,7 @@ def triage(args: argparse.Namespace) -> int:
 
 def render_daily_markdown(results: list[dict[str, Any]]) -> str:
     auto = [item for item in results if item["readiness"] == "auto-fix-candidate"]
+    manual = [item for item in results if item["readiness"] == "manual-review-first"]
     needs = [item for item in results if item["confirmation_required"] or item["readiness"] == "ask-for-confirmation"]
     redirects = [item for item in results if item["readiness"] == "redirect-to-owner"]
 
@@ -430,6 +445,10 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
 
 {rows(auto)}
 
+## 需人工评审后再决定
+
+{rows(manual)}
+
 ## 需要客户/产品确认
 
 {rows(needs)}
@@ -445,10 +464,10 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
 
 
 def daily(args: argparse.Namespace) -> int:
-    fetch_json(args)
+    imported = import_json_issues(args)
     config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
     root = Path(config_value(config, "bugflow.root", args.root))
-    results = [triage_issue_dir(config, path) for path in sorted(root.iterdir()) if path.is_dir()] if root.exists() else []
+    results = [triage_issue_dir(config, issue_dir(root, issue_key(issue))) for issue in imported]
     report = render_daily_markdown(results)
     if args.report:
         Path(args.report).write_text(report, encoding="utf-8")

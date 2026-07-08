@@ -23,14 +23,27 @@
 
 - 使用 `$issue-triage-and-fix`。
 - 读取 `AGENTS.md` 和 `.codex/bugflow/` 下的项目配置。
-- 先运行 `bugflow_runner.py doctor`，报告 warn/error；有 error 时停止。
+- 使用 Codex 内置 Python 运行 `bugflow_runner.py doctor`，不要先用系统 `python` 再用 `uv` 兜底；报告 warn/error，有 error 时停止。
 - 如果 `doctor` 中 `field-mapping`、`requirement-field` 和 `status-codes` 都是 ok，后续拉取应信任项目配置，不要再做全量字段发现。
 - 只有 MQL 报字段错误、配置缺字段，或用户明确要求重新发现字段时，才用字段配置工具做精确查询。
 - 拉取分配给当前用户、状态为待修复或重新打开的工单。
 - 包含关联需求、标题、状态、优先级、描述、截图/附件、负责人和更新时间。
 - 生成或更新 `.bugflow/issues/<bug-number>/` 工件。
-- 输出每日分诊报告：新增 bug、需要确认、非当前仓库、安全修复候选。
+- 只处理本次拉取到的 bug；不要扫描 `.bugflow/issues` 下的历史目录混入日报。
+- 输出每日分诊报告：新增 bug、需要人工评审、需要确认、非当前仓库、安全修复候选。
 - 明确安全边界：不索要密钥、不改远程状态、不改代码、不提交。
+
+## 快路径
+
+定时分诊应优先走快路径，避免把一次日报变成探索式会话：
+
+1. 用 Codex 内置 Python 跑 `doctor`。
+2. 用 MCP 查本次待处理 issue。
+3. 把本次查询结果转成标准 JSON。
+4. 用 `bugflow_runner.py daily --input <json> --report .bugflow/daily-report.md` 更新工件和日报。
+5. 输出日报摘要。
+
+不要在快路径中读取 automation memory、重新探索可用工具、扫描历史 bugflow 目录、运行 build/lint、打开浏览器或做代码修复。
 
 ## 字段发现策略
 
