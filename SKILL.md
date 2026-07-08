@@ -20,6 +20,8 @@ Skill + Workflow + 工件化执行框架 + v1 fetch/triage runner
 
 它已经适合在 Codex 中手动或半自动执行 bug 分诊，也可以作为 Codex“已安排”任务的执行基础。当前 runner 支持从飞书/MCP/导出的 JSON 导入工单、生成 bugflow 工件、执行需求-仓库匹配和初步分诊，但不会自动改代码或远程状态。
 
+如果用户希望每天自动分诊，阅读 `references/scheduled-automation.md`。技能可以提示并协助创建或更新 Codex“已安排”任务，但不能在用户未要求或未确认时静默创建定时任务。默认推荐任务配置为本地环境、`GPT-5.5`、推理级别 `超高/xhigh`。
+
 ## 工件化 Bugflow
 
 当一个 bug 需要跨多仓库判断、需要客户/产品确认、需要可恢复执行，或需要保留过程证据时，使用 bugflow 工件。
@@ -128,6 +130,7 @@ issue-intake -> requirement-match -> triage-report -> fix-plan -> implementation
 - `references/browser-verification.md`：浏览器验证与登录策略。
 - `references/status-workflow.md`：远程状态流转策略。
 - `references/project-config.md`：配置栈和合并规则。
+- `references/scheduled-automation.md`：Codex“已安排”任务创建、更新和默认模型配置。
 - `scripts/normalize_issue_payload.py`：把不同平台工单转成标准 issue JSON。
 - `scripts/bugflow_artifacts.py`：初始化 bug 工作目录，查看工件 ready/blocked/done 状态。
 - `scripts/bugflow_runner.py`：v1 分诊 runner，支持 `doctor`、`fetch-json`、`triage`、`daily`。
