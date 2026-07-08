@@ -18,7 +18,7 @@ STANDARD_FIELDS = {
     "priority": ["priority", "severity"],
     "assignee": ["assignee", "current_status_operator", "owner"],
     "description": ["description", "body", "content"],
-    "requirements": ["requirements", "requirement", "demand", "story", "related_requirement", "需求"],
+    "requirements": ["requirements", "_field_linked_story", "requirement", "demand", "story", "related_requirement", "需求"],
     "attachments": ["attachments", "files", "field_696151"],
     "updated_at": ["updated_at", "updated", "modified_at"],
     "source_url": ["source_url", "url", "link", "web_url"],

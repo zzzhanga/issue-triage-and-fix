@@ -32,7 +32,7 @@ Use project config field mappings when present.
 If a query fails or the project differs from the known mapping:
 
 1. Fetch work item field config for the project and work item type.
-2. Confirm the status option id for the configured pending/open label.
+2. Confirm every status option id/code from the `work_item_status` field config. Do not infer status ids from labels or screenshots.
 3. Confirm assignee/current-operator, requirement/demand, description, priority, attachment, and updated-time fields.
 4. Rebuild queries using field keys and option ids, not display labels.
 
@@ -42,13 +42,19 @@ For `ai-rays.issue`, the historical mapping is:
 
 - work item type: `issue`
 - status field: `work_item_status`
-- pending status id: `OPEN` for label `待修复`
+- status ids from field config:
+  - `OPEN`: `待修复`
+  - `IN PROGRESS`: `修复中`
+  - `RESOLVED`: `已解决，待验收`
+  - `REOPENED`: `重新打开`
+  - `CLOSED`: `已完成`
+  - `systemEnded`: `已终止`
 - current operator field: `current_status_operator`
 - title field: `name`
 - description field: `description`
 - screenshot/recording field: `field_696151`
 - updated time field: `updated_at`
-- requirement/demand field: configure in `requirement_mapping.issue_requirement_field` after field discovery.
+- requirement/demand field: `_field_linked_story`
 
 Treat this as a default only. Project config overrides it.
 
@@ -60,12 +66,12 @@ Use this shape for "my pending issues" when the mapping matches:
 SELECT `work_item_id`, `auto_number`, `name`, `current_status_operator`, `work_item_status`, `priority`, `description`, `field_696151`, `updated_at`
 FROM `PROJECT_KEY`.`WORK_ITEM_TYPE`
 WHERE array_contains(`current_status_operator`, current_login_user())
-  AND `work_item_status` = '<id:OPEN>'
+  AND `work_item_status` IN ('待修复', '重新打开')
 ORDER BY `updated_at` DESC
 LIMIT 20
 ```
 
-Replace `PROJECT_KEY`, `WORK_ITEM_TYPE`, field names, status id, and limit from project config.
+Replace `PROJECT_KEY`, `WORK_ITEM_TYPE`, field names, status values, and limit from project config. Feishu MQL may require display labels in `WHERE` even when field config exposes option ids; if MQL rejects the status condition, only adjust the `WHERE` status value and keep the verified field keys unchanged.
 
 Add the configured requirement/demand field to the SELECT list when available. If the list query omits linked requirements, fetch the full work item before repository matching.
 
@@ -101,7 +107,7 @@ The Feishu bug workflow may include these labels:
 - `已完成`
 - `已终止`
 
-Only `OPEN` is a historically known id for `待修复` in some projects. Resolve every other status id from Feishu field config before status updates.
+Resolve every status id from Feishu field config before status updates. Labels are acceptable for display and sometimes for MQL filtering, but status update APIs should use the verified option id/code.
 
 ## Status Updates
 

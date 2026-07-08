@@ -29,13 +29,13 @@ field_mapping:
   assignee: current_status_operator
   priority: priority
   description: description
-  requirements: requirement
+  requirements: _field_linked_story
   attachments: field_696151
   updated_at: updated_at
 
 requirement_mapping:
   enabled: true
-  issue_requirement_field: requirement
+  issue_requirement_field: _field_linked_story
   current_repo:
     repo_key: current-repo
     path: .
@@ -72,28 +72,31 @@ bugflow:
 
 query_policy:
   assigned_to: current_login_user()
-  status: OPEN
+  status:
+    - OPEN
+    - REOPENED
   limit: 20
   order_by: updated_at desc
 
+# Always confirm these ids with Feishu `list_workitem_field_config` for the target project.
 statuses:
   open:
     id: OPEN
     label: 待修复
   in_progress:
-    id:
+    id: "IN PROGRESS"
     label: 修复中
   resolved_waiting_acceptance:
-    id:
+    id: RESOLVED
     label: 已解决，待验收
   reopened:
-    id:
+    id: REOPENED
     label: 重新打开
   completed:
-    id:
+    id: CLOSED
     label: 已完成
   terminated:
-    id:
+    id: systemEnded
     label: 已终止
 
 status_transitions:

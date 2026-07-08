@@ -512,6 +512,31 @@ def doctor(args: argparse.Namespace) -> int:
     else:
         add("ok", "field-mapping", "id/number/title/status are mapped")
 
+    requirement_field = mapping.get("requirements")
+    if not requirement_field:
+        add("warn", "requirement-field", "missing field_mapping.requirements")
+    elif platform == "feishu-project" and requirement_field == "requirement":
+        add("warn", "requirement-field", "configured as requirement; Feishu linked story is often _field_linked_story")
+    else:
+        add("ok", "requirement-field", f"requirements -> {requirement_field}")
+
+    statuses = config.get("statuses") or {}
+    status_codes: list[str] = []
+    missing_status_codes: list[str] = []
+    for status_key, status_value in statuses.items():
+        if not isinstance(status_value, dict):
+            continue
+        status_id = status_value.get("id")
+        status_label = status_value.get("label") or status_key
+        if status_id:
+            status_codes.append(f"{status_key}={status_id}({status_label})")
+        else:
+            missing_status_codes.append(str(status_key))
+    if status_codes:
+        add("ok", "status-codes", ", ".join(status_codes))
+    if missing_status_codes:
+        add("warn", "status-codes", f"missing ids: {', '.join(missing_status_codes)}")
+
     root = Path(config_value(config, "bugflow.root", args.root))
     if config_value(config, "bugflow.enabled", True):
         add("ok", "bugflow-root", normalize_relative_path(root))
