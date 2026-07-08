@@ -12,6 +12,15 @@ Default path:
 .bugflow/issues/<issue-number>/
 ```
 
+Recommended layout:
+
+| Path | Purpose | Git policy |
+| --- | --- | --- |
+| `.codex/bugflow/` | Local workflow config, schema, and user-local overrides. | Usually ignored with `.codex/`. |
+| `.bugflow/` | Generated run artifacts such as daily reports, issue intake, triage, fix plans, verification, and closure notes. | Add to the project `.gitignore` by default. |
+
+Keep generated artifacts outside `.codex/bugflow/` so configuration does not mix with daily run output, and so the workflow can remain readable for non-Codex agents or scripts. Commit `.bugflow/` only when the team intentionally wants bug evidence and repair notes reviewed in git.
+
 Default artifacts:
 
 | Artifact | File | Purpose |
@@ -94,3 +103,14 @@ Use `scripts/bugflow_artifacts.py` to initialize and inspect issue work director
 python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_artifacts.py init --root .bugflow/issues --issue BUG-28814 --title "Image display bug"
 python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_artifacts.py status --root .bugflow/issues --issue BUG-28814 --json
 ```
+
+Use `scripts/bugflow_runner.py` for v1 daily triage automation:
+
+```powershell
+python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py doctor
+python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py fetch-json --input feishu-bugs.json
+python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py triage
+python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py daily --input feishu-bugs.json --report .bugflow/daily-report.md
+```
+
+The v1 runner checks local setup with `doctor`, imports JSON, creates or updates artifacts, performs deterministic requirement-to-repository matching, writes `requirement-match.md` and `triage.md`, and prints a daily report. It does not edit code or update remote issue status.

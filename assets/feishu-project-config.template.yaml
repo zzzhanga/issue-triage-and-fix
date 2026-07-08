@@ -63,7 +63,10 @@ requirement_mapping:
 
 bugflow:
   enabled: true
+  # Generated artifacts live here. Add `.bugflow/` to the host repo's .gitignore
+  # unless the team intentionally wants to review bugflow artifacts in git.
   root: .bugflow/issues
+  # Config/schema stays under `.codex/bugflow/` so it is separate from run output.
   schema: .codex/bugflow/schema.yaml
   commit_artifacts_by_default: false
 

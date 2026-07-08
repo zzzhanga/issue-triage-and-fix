@@ -1,144 +1,167 @@
 ---
 name: issue-triage-and-fix
-description: Fetch assigned bugs or issues, map issue requirements to local code repositories, triage ownership and effort, recommend repair order, fix safe candidates, verify locally and in a browser, and optionally comment or update remote issue workflow status. Use when Codex needs an internal engineering workflow for Feishu Project, Jira, TAPD, ZenTao, GitLab Issues, or similar trackers, especially when tracker fields, requirement-to-repository mappings, login policy, verification commands, and status transitions should be read from config.
+description: 飞书/Jira/TAPD/禅道/GitLab Issues 等缺陷工单分诊与修复工作流。Use when Codex needs to fetch assigned bugs or issues, map linked requirements to local repositories, triage ownership and effort, recommend repair order, generate bugflow artifacts, fix safe candidates, verify locally and in a browser, and optionally comment or update remote issue status from config.
 ---
+# 缺陷分诊与修复工作流
 
-# Issue Triage And Fix
+## 概览
 
-## Overview
+使用这个技能把工单系统里的 bug 转成可控的工程任务：拉取工单、识别关联需求、判断对应代码库、分诊责任和难度、只修复低风险候选项、完成本地与浏览器验证，并在策略允许时评论或流转远程状态。
 
-Use this skill to turn issue tracker bugs into controlled engineering work: fetch the issues, classify them, repair only the safe candidates, verify the result, and close the loop with a status/comment when policy allows it.
+这个技能是一个编排入口。平台细节、需求与仓库匹配、分诊规则、浏览器验证、状态流转、项目配置都拆在 `references/`、`assets/` 和 `scripts/` 里，方便不同项目复用同一套流程。
 
-This is the orchestrating workflow. Keep platform details, requirement-to-repository matching, classification rules, browser verification, and repo-scoped config in references so another project can reuse the same process with different settings.
+## 当前定位
 
-## Artifact-Guided Bugflow
+当前版本是：
 
-Use bugflow artifacts when a bug needs more than a quick answer, when multiple repositories may be involved, or when work should be resumable and auditable.
+```text
+Skill + Workflow + 工件化执行框架 + v1 fetch/triage runner
+```
 
-Default issue work directory:
+它已经适合在 Codex 中手动或半自动执行 bug 分诊，也可以作为 Codex“已安排”任务的执行基础。当前 runner 支持从飞书/MCP/导出的 JSON 导入工单、生成 bugflow 工件、执行需求-仓库匹配和初步分诊，但不会自动改代码或远程状态。
+
+## 工件化 Bugflow
+
+当一个 bug 需要跨多仓库判断、需要客户/产品确认、需要可恢复执行，或需要保留过程证据时，使用 bugflow 工件。
+
+默认 bug 工作目录：
 
 ```text
 .bugflow/issues/<issue-number>/
 ```
 
-Default artifact chain:
+推荐把 `.codex/bugflow/` 用于项目配置和 schema，把 `.bugflow/` 用于每日运行生成的分诊、修复和验证工件。`.bugflow/` 可能包含客户名称、工单描述、截图线索和过程判断，默认应加入所在项目的 `.gitignore`；只有团队明确希望在代码评审中共享这些工件时，才提交到仓库。
+
+默认工件链：
 
 ```text
 issue-intake -> requirement-match -> triage-report -> fix-plan -> implementation -> verification -> closure
 ```
 
-Actions are fluid, not rigid phases. Use the next ready artifact when the path is clear; update earlier artifacts when new information changes the requirement, repo match, or fix plan.
+动作不是僵硬阶段。信息明确时可以继续处理下一个 ready 工件；如果实现过程中发现需求、仓库归属或修复方案有变化，要回头更新前面的工件。
 
-## Required Inputs
+## 必要输入
 
-Before acting, locate or ask for:
+执行前先定位或询问：
 
-- The current repository path.
-- A config stack: skill defaults, a repo-scoped project config, an optional local override config, and the current user request.
-- The issue source: Feishu Project, Jira, TAPD, ZenTao, GitLab Issues, or a supplied JSON export.
-- The user's requested mode: list only, triage only, fix one issue, or run the full controlled workflow.
+- 当前代码库路径。
+- 配置栈：技能默认规则、项目级配置、本地覆盖配置、当前用户请求。
+- 工单来源：飞书项目、Jira、TAPD、禅道、GitLab Issues，或用户提供的 JSON 导出。
+- 用户期望模式：只列出、只分诊、修复单个 bug，或完整受控闭环。
 
-If no repo-scoped project config exists, read `references/project-config.md` and use `assets/project-config.template.yaml` or `assets/feishu-project-config.template.yaml` to draft one before making remote workflow changes.
+如果项目还没有配置，先阅读 `references/project-config.md`，再使用 `assets/project-config.template.yaml` 或 `assets/feishu-project-config.template.yaml` 起草配置。没有明确配置前，不要修改远程工单状态。
 
-## Workflow
+## 标准流程
 
-1. Read project rules.
-   - Read repository guidance such as `AGENTS.md`, `README.md`, and configured project docs.
-   - Read the config stack in this order: repo-scoped project config, optional local override config, then current user request.
-   - Treat repo-scoped project config as the source for issue fields, requirement-to-repository mappings, status ids, team workflow, verification commands, and project ownership rules.
-   - Treat local override config as the source for user-specific login preference, local ports, secret environment variable names, and stricter automation preferences.
+1. 读取项目规则。
 
-2. Fetch issues.
-   - Read `references/fetch-issues.md`.
-   - For artifact-guided work, create or update `issue.json` under the issue work directory.
-   - Load platform-specific instructions only when needed, for example `references/feishu-project.md`.
-   - Fetch only actionable issues first: assigned to the target user and in the configured open/pending status.
-   - Fetch requirement links or requirement fields when the tracker provides them.
-   - Normalize the result to the standard issue shape before triage.
+   - 阅读 `AGENTS.md`、`README.md` 和项目配置中列出的文档。
+   - 按顺序读取配置栈：项目级配置、本地覆盖配置、当前用户请求。
+   - 项目级配置负责工单字段、需求与仓库映射、状态 id、团队流程、验证命令、项目归属规则。
+   - 本地覆盖配置只放用户登录偏好、本地端口、密钥环境变量名、更严格的自动化策略。
+2. 拉取工单。
 
-3. Resolve requirement and repository association.
-   - Read `references/requirement-repo-mapping.md`.
-   - For artifact-guided work, create or update `requirement-match.md`.
-   - Match the issue's requirement, title, links, screenshots, and configured demand aliases to candidate repositories.
-   - Proceed only when the current repository is a confident match or the user explicitly selected it.
-   - If a requirement maps to multiple repositories and ownership is unclear, prepare a customer/product confirmation question instead of guessing.
+   - 阅读 `references/fetch-issues.md`。
+   - 工件化执行时，在 bug 工作目录创建或更新 `issue.json`。
+   - 只在需要时加载平台适配文档，例如 `references/feishu-project.md`。
+   - 优先拉取分配给目标用户、状态为待处理的可行动工单。
+   - 如果平台提供关联需求字段，必须一起拉取。
+   - 分诊前把工单标准化为统一 issue JSON。
+3. 解析需求与代码库关系。
 
-4. Triage issues.
-   - Read `references/triage-issues.md`.
-   - For artifact-guided work, create or update `triage.md`.
-   - Classify ownership, effort, readiness, risk, and recommended execution order.
-   - Do not change code or remote statuses during triage-only requests.
+   - 阅读 `references/requirement-repo-mapping.md`。
+   - 工件化执行时，创建或更新 `requirement-match.md`。
+   - 根据工单里的需求、标题、链接、截图、配置中的需求别名，匹配候选代码库。
+   - 只有当前代码库是高置信匹配，或用户明确指定当前代码库时，才继续进入修复。
+   - 如果一个需求对应多个代码库且归属不清，生成客户/产品确认问题，不要猜。
+4. 分诊工单。
 
-5. Select repair candidates.
-   - For artifact-guided work, create or update `fix-plan.md` before editing code.
-   - Fix only issues classified as `auto-fix-candidate` unless the user explicitly chooses another issue.
-   - Do not auto-fix `hard`, `blocked`, `needs-confirmation`, `not-current-repo`, or cross-owner issues.
+   - 阅读 `references/triage-issues.md`。
+   - 工件化执行时，创建或更新 `triage.md`。
+   - 判断责任归属、修复难度、执行准备度、风险等级和推荐处理顺序。
+   - 只分诊时，不改代码、不改远程状态。
+5. 选择修复候选。
 
-6. Start repair workflow.
-   - Read `references/status-workflow.md` and `references/fix-and-verify.md`.
-   - Change the remote issue to the configured in-progress status only when project config allows it.
-   - Never update remote status when credentials, project identity, or transition policy are unclear.
+   - 工件化执行时，修改代码前创建或更新 `fix-plan.md`。
+   - 默认只修复 `auto-fix-candidate`。
+   - `hard`、`blocked`、`needs-confirmation`、`not-current-repo`、跨团队问题都不能自动修复，除非用户明确指定。
+6. 开始修复流程。
 
-7. Implement the fix.
-   - Keep edits scoped to the issue.
-   - Follow the repository's component, style, testing, formatting, and branch conventions.
-   - Do not revert unrelated user changes.
+   - 阅读 `references/status-workflow.md` 和 `references/fix-and-verify.md`。
+   - 只有项目配置允许时，才把远程工单改为“修复中”。
+   - 如果凭证、项目身份、状态流转策略不明确，不要修改远程状态。
+7. 实现修复。
 
-8. Verify.
-   - Run the configured targeted format, lint, test, style, build, or regression commands.
-   - For artifact-guided work, create or update `verification.md`.
-   - For visible UI behavior, read `references/browser-verification.md` and verify in a browser unless the user opted out.
-   - Use configured login policy; never ask the user to paste a password.
+   - 保持改动范围只围绕当前 bug。
+   - 遵守当前仓库的组件、样式、测试、格式化和分支约定。
+   - 不回滚用户或其他 agent 的无关改动。
+8. 验证。
 
-9. Close the loop.
-   - Post a comment only when config or the user allows remote comments.
-   - For artifact-guided work, create or update `closure.md`.
-   - Include changed files, verification commands, browser evidence when available, and residual risk.
-   - Move to resolved-for-acceptance, completed, or terminated only when config allows it or the user explicitly approves.
+   - 运行项目配置中的格式化、lint、测试、stylelint、构建或回归脚本。
+   - 工件化执行时，创建或更新 `verification.md`。
+   - 可见 UI 问题必须阅读 `references/browser-verification.md` 并做浏览器验证，除非用户明确说不需要。
+   - 遵守登录策略，不要求用户在聊天里粘贴密码。
+9. 闭环。
 
-## Operating Modes
+   - 只有配置或用户允许时，才评论远程工单。
+   - 工件化执行时，创建或更新 `closure.md`。
+   - 评论中说明改动文件、验证命令、浏览器证据和剩余风险。
+   - 只有配置允许或用户明确确认时，才流转到“已解决，待验收”“已完成”或“已终止”。
 
-- `list`: Fetch and summarize assigned issues without triage details.
-- `triage`: Fetch, normalize, classify, and rank issues without code or remote status changes.
-- `fix-one`: Repair one user-selected issue with verification.
-- `full-controlled`: Triage, select safe candidates, optionally mark in progress, fix, verify, comment, and optionally transition.
+## 运行模式
 
-Default to `triage` when the user is exploring, and to `fix-one` when the user names a specific issue.
+- `list`：拉取并摘要工单，不输出详细分诊。
+- `triage`：拉取、标准化、需求匹配、分诊和排序，不改代码、不改远程状态。
+- `fix-one`：修复用户指定的单个工单，并完成验证。
+- `full-controlled`：分诊、选择安全候选、可选改为“修复中”、修复、验证、评论、可选流转状态。
 
-## Resource Map
+用户只是探索时，默认使用 `triage`。用户明确指定某个 bug 时，默认使用 `fix-one`。
 
-- `references/fetch-issues.md`: Issue retrieval and normalized payload contract.
-- `references/bugflow-artifacts.md`: Artifact-guided workflow, action rules, and status model.
-- `references/requirement-repo-mapping.md`: Requirement-to-repository matching and customer confirmation rules.
-- `references/triage-issues.md`: Ownership, effort, readiness, risk, and ranking rules.
-- `references/fix-and-verify.md`: Code repair, local validation, browser validation, and closing comments.
-- `references/feishu-project.md`: Feishu Project adapter rules.
-- `references/browser-verification.md`: Browser verification and login policy.
-- `references/status-workflow.md`: Remote status transition policy.
-- `references/project-config.md`: Config stack schema and merge rules.
-- `scripts/normalize_issue_payload.py`: Convert tracker payloads to the standard issue JSON shape.
-- `scripts/bugflow_artifacts.py`: Initialize issue work directories and report artifact readiness.
-- `assets/bugflow-schema.template.yaml`: Copyable artifact dependency schema.
-- `assets/project-config.template.yaml`: Copyable repo-scoped project config starter.
-- `assets/feishu-project-config.template.yaml`: Copyable Feishu-specific config starter with requirement mapping and status labels.
-- `assets/local-overrides.template.yaml`: Copyable local user override starter.
+## 资源索引
 
-## Safety Rules
+- `references/fetch-issues.md`：工单获取和标准化 issue JSON。
+- `references/bugflow-artifacts.md`：工件化流程、动作规则和状态模型。
+- `references/requirement-repo-mapping.md`：需求与代码库匹配、客户确认规则。
+- `references/triage-issues.md`：归属、难度、准备度、风险和排序规则。
+- `references/fix-and-verify.md`：代码修复、本地验证、浏览器验证、闭环评论。
+- `references/feishu-project.md`：飞书项目适配规则。
+- `references/browser-verification.md`：浏览器验证与登录策略。
+- `references/status-workflow.md`：远程状态流转策略。
+- `references/project-config.md`：配置栈和合并规则。
+- `scripts/normalize_issue_payload.py`：把不同平台工单转成标准 issue JSON。
+- `scripts/bugflow_artifacts.py`：初始化 bug 工作目录，查看工件 ready/blocked/done 状态。
+- `scripts/bugflow_runner.py`：v1 分诊 runner，支持 `doctor`、`fetch-json`、`triage`、`daily`。
+- `assets/bugflow-schema.template.yaml`：工件依赖图模板。
+- `assets/project-config.template.yaml`：通用项目级配置模板。
+- `assets/feishu-project-config.template.yaml`：飞书项目配置模板。
+- `assets/local-overrides.template.yaml`：本地用户覆盖配置模板。
 
-- Do not request, echo, store, or commit passwords, tokens, MCP URLs, cookies, or session secrets.
-- Prefer official API/MCP access over browser scraping. Use browser login only for one-off interactive access when the user allows it.
-- Do not change issue status by default. The project config must allow the specific transition, or the user must approve it.
-- Do not mark an issue fixed solely because code was edited. Verify first, then report any unverified portions.
-- Do not batch-fix multiple issues unless the user requests a batch and the issues are independently low risk.
+## 安全规则
 
-## Final Output
+- 不索要、不回显、不保存、不提交密码、token、MCP URL、cookie、session secret。
+- 优先使用官方 API、MCP 或 SDK；只有用户允许时，才用浏览器登录做一次性读取。
+- 默认不修改远程状态；必须由项目配置允许具体流转，或用户明确批准。
+- 不能因为代码改了就认为 bug 已修复；必须先验证，再说明未验证部分。
+- 不批量自动修复多个 bug，除非用户明确要求且每个 bug 都是低风险、相互独立。
 
-For triage, report issue id/title, ownership, effort, readiness, risk, and recommended order.
+## 输出要求
 
-For fixes, report:
+分诊输出应包含：
 
-- Issue id/title.
-- Remote status changes or comments made.
-- Files changed.
-- Verification commands and browser checks.
-- Residual risks or blocked items.
+- 工单 id/编号和标题。
+- 关联需求。
+- 当前代码库匹配结果和置信度。
+- 责任归属。
+- 难度。
+- 执行准备度。
+- 风险。
+- 推荐处理顺序。
+- 需要客户/产品确认的问题。
+
+修复输出应包含：
+
+- 工单 id/编号和标题。
+- 远程状态变更或评论记录。
+- 修改文件。
+- 验证命令和浏览器检查。
+- 剩余风险或阻塞项。

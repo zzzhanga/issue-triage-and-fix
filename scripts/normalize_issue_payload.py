@@ -88,6 +88,8 @@ def normalize_issue(issue: dict[str, Any], platform: str, mapping: dict[str, str
     for field, candidates in STANDARD_FIELDS.items():
         if field in mapping:
             value = get_path(issue, mapping[field])
+            if value in (None, ""):
+                value = first_present(issue, candidates)
         else:
             value = first_present(issue, candidates)
         normalized[field] = value

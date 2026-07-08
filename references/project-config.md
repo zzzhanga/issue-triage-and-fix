@@ -127,6 +127,12 @@ bugflow:
   commit_artifacts_by_default: false
 ```
 
+Recommended split:
+
+- `.codex/bugflow/` stores config and schema.
+- `.bugflow/` stores generated daily reports and per-issue artifacts.
+- Add `.bugflow/` to the host project's `.gitignore` when `commit_artifacts_by_default` is false.
+
 Keep `commit_artifacts_by_default` false when issue descriptions, screenshots, customer names, or tracker metadata should stay local. Set it true only when the team wants bugflow artifacts reviewed in git.
 
 ## Secret Handling
