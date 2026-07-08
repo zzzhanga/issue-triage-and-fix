@@ -100,17 +100,19 @@ Dependencies are enablers, not hard gates. A user can explicitly override an act
 Use `scripts/bugflow_artifacts.py` to initialize and inspect issue work directories:
 
 ```powershell
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_artifacts.py init --root .bugflow/issues --issue BUG-28814 --title "Image display bug"
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_artifacts.py status --root .bugflow/issues --issue BUG-28814 --json
+python <skill-dir>\scripts\bugflow_artifacts.py init --root .bugflow/issues --issue BUG-28814 --title "Image display bug"
+python <skill-dir>\scripts\bugflow_artifacts.py status --root .bugflow/issues --issue BUG-28814 --json
 ```
 
-Use `scripts/bugflow_runner.py` for v1 daily triage automation:
+Use `scripts/bugflow_runner.py` for setup and daily triage automation:
 
 ```powershell
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py doctor
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py fetch-json --input feishu-bugs.json
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py triage
-python C:\Users\zhanghang\.codex\skills\issue-triage-and-fix\scripts\bugflow_runner.py daily --input feishu-bugs.json --report .bugflow/daily-report.md
+python <skill-dir>\scripts\bugflow_runner.py init-project --platform feishu-project --project-name my-project --project-key my-feishu-project-key
+python <skill-dir>\scripts\bugflow_runner.py doctor
+python <skill-dir>\scripts\bugflow_runner.py feishu-mql --json
+python <skill-dir>\scripts\bugflow_runner.py fetch-json --input feishu-bugs.json
+python <skill-dir>\scripts\bugflow_runner.py triage
+python <skill-dir>\scripts\bugflow_runner.py daily --input feishu-bugs.json --report .bugflow/daily-report.md
 ```
 
-The v1 runner checks local setup with `doctor`, imports JSON, creates or updates artifacts, performs deterministic requirement-to-repository matching, writes `requirement-match.md` and `triage.md`, and prints a daily report. It does not edit code or update remote issue status.
+The runner creates starter config with `init-project`, checks local setup with `doctor`, generates Feishu MQL from config with `feishu-mql`, imports JSON, creates or updates artifacts, performs deterministic requirement-to-repository matching, writes `requirement-match.md` and `triage.md`, and prints a daily report. It does not edit code or update remote issue status.

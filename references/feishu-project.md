@@ -7,12 +7,12 @@ Use this reference when `issue_source.platform` is `feishu-project` or the user 
 Parse URLs such as:
 
 ```text
-https://project.feishu.cn/ai-rays/issue/homepage
+https://project.feishu.cn/PROJECT_KEY/issue/homepage
 ```
 
 In this example:
 
-- project key: `ai-rays`
+- project key: `PROJECT_KEY`
 - work item type: `issue`
 
 If the URL is missing a project key or work item type, use repo-scoped project config. Ask only when neither source provides it.
@@ -38,22 +38,22 @@ If a query fails or the project differs from the known mapping:
 3. Confirm assignee/current-operator, requirement/demand, description, priority, attachment, and updated-time fields.
 4. Rebuild queries using field keys and option ids, not display labels.
 
-For `ai-rays.issue`, this exact field-config query is known to return the key fields:
+When the project config is incomplete, query exact field keys first:
 
 ```text
-project_key=ai-rays
+project_key=<project-key>
 work_item_type=issue
-field_keys=["work_item_status", "_field_linked_story", "field_696151"]
+field_keys=["work_item_status", "<requirement-field>", "<attachment-field>"]
 page_num=1
 ```
 
 ## Common Feishu Fields
 
-For `ai-rays.issue`, the historical mapping is:
+Many Feishu Project issue schemas use this shape, but each target project must confirm it with field config:
 
 - work item type: `issue`
 - status field: `work_item_status`
-- status ids from field config:
+- common status ids:
   - `OPEN`: `待修复`
   - `IN PROGRESS`: `修复中`
   - `RESOLVED`: `已解决，待验收`
@@ -63,18 +63,34 @@ For `ai-rays.issue`, the historical mapping is:
 - current operator field: `current_status_operator`
 - title field: `name`
 - description field: `description`
-- screenshot/recording field: `field_696151`
+- screenshot/recording field: project-specific, often a custom `field_*`
 - updated time field: `updated_at`
-- requirement/demand field: `_field_linked_story`
+- requirement/demand field: project-specific, often `_field_linked_story` or a custom `field_*`
 
 Treat this as a default only. Project config overrides it.
+
+## Generate MQL From Config
+
+Use the runner to generate the minimum query from project config:
+
+```powershell
+python <skill-dir>\scripts\bugflow_runner.py feishu-mql
+```
+
+The command prints:
+
+- the MQL SELECT list
+- the status filter values
+- exact field keys to use when field config must be checked
+
+Use `--json` when passing the query metadata to another script or scheduled task.
 
 ## Default MQL Shape
 
 Use this shape for "my pending issues" when the mapping matches:
 
 ```sql
-SELECT `work_item_id`, `auto_number`, `name`, `current_status_operator`, `work_item_status`, `priority`, `description`, `field_696151`, `updated_at`
+SELECT `work_item_id`, `auto_number`, `name`, `current_status_operator`, `work_item_status`, `priority`, `description`, `<attachment-field>`, `updated_at`, `<requirement-field>`
 FROM `PROJECT_KEY`.`WORK_ITEM_TYPE`
 WHERE array_contains(`current_status_operator`, current_login_user())
   AND `work_item_status` IN ('待修复', '重新打开')

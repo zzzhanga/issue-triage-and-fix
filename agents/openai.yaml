@@ -1,4 +1,4 @@
 interface:
   display_name: "Issue Triage And Fix"
-  short_description: "Map requirements to repos, triage bugs, fix, verify, and close with artifacts."
-  default_prompt: "Use $issue-triage-and-fix to map my assigned bugs to the right repo, triage them, and fix safe candidates with artifact-guided verification."
+  short_description: "Initialize bugflow config, fetch assigned issues, map repos, triage, fix, and verify."
+  default_prompt: "Use $issue-triage-and-fix to initialize bugflow config if needed, fetch my assigned bugs, map requirements to repos, triage them, and fix safe candidates with artifact-guided verification."

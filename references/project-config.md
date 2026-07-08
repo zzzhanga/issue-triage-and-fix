@@ -40,6 +40,14 @@ Legacy single-file configs may exist at `.codex/issue-triage.config.yaml`; read 
 
 Use `assets/project-config.template.yaml` as the starter.
 
+For a new repository, prefer the runner initializer instead of copying templates by hand:
+
+```powershell
+python <skill-dir>\scripts\bugflow_runner.py init-project --platform feishu-project --project-name my-project --project-key my-feishu-project-key
+```
+
+The initializer creates `.codex/bugflow/issue-triage.project.yaml`, `.codex/bugflow/issue-triage.local.yaml`, `.codex/bugflow/schema.yaml`, and adds `.bugflow/` to `.gitignore` unless told otherwise.
+
 The repo-scoped config should contain project/team facts that should not be rewritten by every user:
 
 - `project`: repository path, docs, role assumption, and local conventions.
@@ -86,23 +94,22 @@ requirement_mapping:
   enabled: true
   issue_requirement_field: requirement
   current_repo:
-    repo_key: admin
+    repo_key: web
     path: .
     aliases:
-      - admin
-      - management backend
-      - 管理后台
+      - web client
+      - current repo
   related_repositories:
-    - repo_key: miniprogram
-      path: ../miniprogram
+    - repo_key: mobile
+      path: ../mobile
       aliases:
-        - miniprogram
-        - 小程序
+        - mobile app
+        - companion app
   demand_rules:
-    - match_title_contains: 上海教育出版社小程序+管理后台
+    - match_title_contains: shared requirement keyword
       repo_keys:
-        - admin
-        - miniprogram
+        - web
+        - mobile
       confirmation_owner: customer
   confirmation_policy:
     confidence_threshold: 0.75

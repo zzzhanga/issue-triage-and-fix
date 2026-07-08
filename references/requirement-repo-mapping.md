@@ -65,9 +65,9 @@ Prepare a concise confirmation question with:
 Example:
 
 ```text
-BUG-28814 belongs to requirement "Shanghai Education Publishing miniprogram + admin".
-It may involve both the miniprogram and admin repository. The screenshot/title points to image display in the admin backend, but the affected client is not explicit.
-Please confirm whether this should be fixed in qikan_manage/admin, the miniprogram repo, or both.
+BUG-28814 belongs to requirement "shared publishing workflow".
+It may involve both the web repository and the mobile repository. The screenshot/title points to image display in the web console, but the affected client is not explicit.
+Please confirm whether this should be fixed in the web repo, the mobile repo, or both.
 ```
 
 ## Output

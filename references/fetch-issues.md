@@ -37,6 +37,8 @@ Default to fetching:
 
 If any configured field fails, fetch the tracker field schema before retrying. Use field keys or ids, not display labels, whenever the platform supports stable identifiers.
 
+For Feishu Project, run `bugflow_runner.py feishu-mql --json` after `doctor` passes. Use the generated MQL for routine fetches, and use the returned `exact_field_config_keys` only when a field error requires schema confirmation.
+
 ## Standard Issue Shape
 
 Normalize each issue to:

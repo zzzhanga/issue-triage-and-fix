@@ -62,14 +62,20 @@ def extract_moql_value(field: dict[str, Any]) -> Any:
     value = field.get("value")
     if not isinstance(value, dict):
         return value
-    if "string_value" in value:
-        return value["string_value"]
-    if "long_value" in value:
-        return value["long_value"]
-    if "bool_value" in value:
-        return value["bool_value"]
-    if "double_value" in value:
-        return value["double_value"]
+    for key in (
+        "string_value",
+        "long_value",
+        "bool_value",
+        "double_value",
+        "date_value",
+        "datetime_value",
+        "timestamp_value",
+        "text_value",
+        "rich_text_value",
+        "url_value",
+    ):
+        if key in value:
+            return value[key]
     if "user_value" in value and isinstance(value["user_value"], dict):
         return normalize_user(value["user_value"])
     if "user_value_list" in value and isinstance(value["user_value_list"], list):
@@ -84,6 +90,14 @@ def extract_moql_value(field: dict[str, Any]) -> Any:
             else item
             for item in value["option_value_list"]
         ]
+    if "work_item_value" in value and isinstance(value["work_item_value"], dict):
+        return value["work_item_value"]
+    if "work_item_value_list" in value and isinstance(value["work_item_value_list"], list):
+        return value["work_item_value_list"]
+    if "attachment_value_list" in value and isinstance(value["attachment_value_list"], list):
+        return value["attachment_value_list"]
+    if "file_value_list" in value and isinstance(value["file_value_list"], list):
+        return value["file_value_list"]
     if len(value) == 1:
         return next(iter(value.values()))
     return value
@@ -93,7 +107,7 @@ def flatten_moql_record(issue: dict[str, Any]) -> dict[str, Any]:
     fields = issue.get("moql_field_list")
     if not isinstance(fields, list):
         return issue
-    flattened: dict[str, Any] = {}
+    flattened: dict[str, Any] = {key: value for key, value in issue.items() if key != "moql_field_list"}
     for field in fields:
         if isinstance(field, dict) and field.get("key"):
             flattened[str(field["key"])] = extract_moql_value(field)
@@ -117,9 +131,10 @@ def normalize_assignee(value: Any) -> Any:
 def normalize_requirement_item(item: Any) -> dict[str, Any]:
     if isinstance(item, dict):
         return {
-            "id": item.get("id") or item.get("work_item_id") or item.get("key") or item.get("value"),
+            "id": item.get("id") or item.get("work_item_id") or item.get("auto_number") or item.get("key") or item.get("value"),
             "title": item.get("title") or item.get("name") or item.get("label") or item.get("text"),
             "url": item.get("url") or item.get("link") or item.get("web_url"),
+            "number": item.get("auto_number") or item.get("number"),
             "raw": item,
         }
     return {"id": None, "title": str(item), "url": None, "raw": item}

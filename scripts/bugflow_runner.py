@@ -17,6 +17,10 @@ from bugflow_artifacts import ARTIFACTS, artifact_template, issue_dir, write_if_
 from normalize_issue_payload import normalize_issue
 
 
+SKILL_ROOT = Path(__file__).resolve().parents[1]
+ASSETS_DIR = SKILL_ROOT / "assets"
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     try:
         import yaml
@@ -59,6 +63,26 @@ def load_json_payload(path: str | None) -> Any:
     if path:
         return json.loads(Path(path).read_text(encoding="utf-8"))
     return json.load(sys.stdin)
+
+
+def yaml_scalar(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def write_text_file(path: Path, text: str, force: bool = False) -> str:
+    existed = path.exists()
+    if existed and not force:
+        return "skipped"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return "updated" if existed else "created"
+
+
+def read_asset(name: str) -> str:
+    path = ASSETS_DIR / name
+    if not path.exists():
+        raise SystemExit(f"Missing skill asset: {path}")
+    return path.read_text(encoding="utf-8")
 
 
 def iter_payload_items(payload: Any) -> list[dict[str, Any]]:
@@ -638,6 +662,182 @@ def gitignore_contains(path: Path, pattern: str) -> bool:
     return False
 
 
+def append_gitignore_pattern(path: Path, pattern: str) -> str:
+    if gitignore_contains(path, pattern):
+        return "exists"
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    path.write_text(f"{existing}{prefix}{pattern}\n", encoding="utf-8")
+    return "added"
+
+
+def build_project_template(args: argparse.Namespace) -> str:
+    template_name = "feishu-project-config.template.yaml" if args.platform == "feishu-project" else "project-config.template.yaml"
+    text = read_asset(template_name)
+    project_name = args.project_name or Path.cwd().name
+    replacements = {
+        "name: example-project": f"name: {yaml_scalar(project_name)}",
+        "project_key: example-key": f"project_key: {yaml_scalar(args.project_key or 'your-project-key')}",
+        "project_key: your-project-key": f"project_key: {yaml_scalar(args.project_key or 'your-project-key')}",
+        "work_item_type: issue": f"work_item_type: {yaml_scalar(args.work_item_type)}",
+        "role_assumption: frontend": f"role_assumption: {yaml_scalar(args.role)}",
+        "repo_key: current-repo": f"repo_key: {yaml_scalar(args.repo_key)}",
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
+
+def init_project(args: argparse.Namespace) -> int:
+    config_path = Path(args.config)
+    local_config_path = Path(args.local_config)
+    schema_path = Path(args.schema)
+    root = Path(args.root)
+
+    results: list[dict[str, str]] = []
+    results.append(
+        {
+            "path": normalize_relative_path(config_path),
+            "action": write_text_file(config_path, build_project_template(args), args.force),
+        }
+    )
+    results.append(
+        {
+            "path": normalize_relative_path(local_config_path),
+            "action": write_text_file(local_config_path, read_asset("local-overrides.template.yaml"), args.force),
+        }
+    )
+    results.append(
+        {
+            "path": normalize_relative_path(schema_path),
+            "action": write_text_file(schema_path, read_asset("bugflow-schema.template.yaml"), args.force),
+        }
+    )
+
+    if not args.skip_gitignore:
+        pattern = top_ignore_pattern(root)
+        action = append_gitignore_pattern(Path(".gitignore"), pattern)
+        results.append({"path": ".gitignore", "action": f"{action} {pattern}"})
+
+    print(json.dumps({"initialized": results}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def unique_values(values: list[str | None]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value:
+            continue
+        normalized = str(value)
+        if normalized not in seen:
+            seen.add(normalized)
+            result.append(normalized)
+    return result
+
+
+def feishu_status_values(config: dict[str, Any], prefer_labels: bool) -> list[str]:
+    query_status = config_value(config, "query_policy.status", config_value(config, "issue_source.default_status"))
+    values = query_status if isinstance(query_status, list) else [query_status]
+    statuses = config.get("statuses") or {}
+    output: list[str] = []
+    for value in values:
+        raw = str(value)
+        matched = None
+        for status_key, status_data in statuses.items():
+            if not isinstance(status_data, dict):
+                continue
+            if raw in (str(status_key), str(status_data.get("id")), str(status_data.get("label"))):
+                matched = status_data
+                break
+        if matched:
+            mapped_value = matched.get("label") if prefer_labels else matched.get("id")
+            output.append(str(mapped_value or raw))
+        else:
+            output.append(raw)
+    return unique_values(output)
+
+
+def quote_sql_string(value: str) -> str:
+    return "'" + value.replace("'", "\\'") + "'"
+
+
+def format_order_by(order_by: str) -> str:
+    parts = order_by.strip().split()
+    if len(parts) in (1, 2) and parts[0].replace("_", "").isalnum():
+        direction = parts[1].upper() if len(parts) == 2 else "DESC"
+        if direction in ("ASC", "DESC"):
+            return f"`{parts[0]}` {direction}"
+    return order_by
+
+
+def build_feishu_mql(config: dict[str, Any], prefer_labels: bool = True) -> dict[str, Any]:
+    mapping = field_mapping(config)
+    project_key = config_value(config, "issue_source.project_key", "PROJECT_KEY")
+    work_item_type = config_value(config, "issue_source.work_item_type", "issue")
+    select_fields = unique_values(
+        [
+            mapping.get("id"),
+            mapping.get("number"),
+            mapping.get("title"),
+            mapping.get("status"),
+            mapping.get("priority"),
+            mapping.get("reporter"),
+            mapping.get("assignee"),
+            mapping.get("created_at"),
+            mapping.get("updated_at"),
+            mapping.get("requirements"),
+            mapping.get("description"),
+            mapping.get("attachments"),
+        ]
+    )
+    status_field = mapping.get("status") or "work_item_status"
+    assignee_field = mapping.get("assignee") or "current_status_operator"
+    assigned_to = str(config_value(config, "query_policy.assigned_to", "current_login_user()"))
+    status_values = feishu_status_values(config, prefer_labels)
+    order_by = format_order_by(str(config_value(config, "query_policy.order_by", f"{mapping.get('updated_at') or 'updated_at'} desc")))
+    limit = int(config_value(config, "query_policy.limit", 20) or 20)
+    select_clause = ", ".join(f"`{field}`" for field in select_fields) or "`work_item_id`, `name`, `work_item_status`"
+    if assigned_to == "current_login_user()":
+        assignee_condition = f"array_contains(`{assignee_field}`, current_login_user())"
+    else:
+        assignee_condition = f"array_contains(`{assignee_field}`, {quote_sql_string(assigned_to)})"
+    status_condition = ", ".join(quote_sql_string(value) for value in status_values)
+    mql = (
+        f"SELECT {select_clause}\n"
+        f"FROM `{project_key}`.`{work_item_type}`\n"
+        f"WHERE {assignee_condition}\n"
+        f"  AND `{status_field}` IN ({status_condition})\n"
+        f"ORDER BY {order_by}\n"
+        f"LIMIT {limit}"
+    )
+    exact_field_config_keys = unique_values([status_field, mapping.get("requirements"), mapping.get("attachments")])
+    return {
+        "project_key": project_key,
+        "work_item_type": work_item_type,
+        "select_fields": select_fields,
+        "status_filter_values": status_values,
+        "exact_field_config_keys": exact_field_config_keys,
+        "mql": mql,
+    }
+
+
+def feishu_mql(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    if config_value(config, "issue_source.platform") != "feishu-project":
+        raise SystemExit("feishu-mql requires issue_source.platform: feishu-project")
+    result = build_feishu_mql(config, prefer_labels=not args.use_status_ids)
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print("MQL:")
+        print(result["mql"])
+        print()
+        print("Exact field config keys:")
+        print(", ".join(result["exact_field_config_keys"]) or "none")
+    return 0
+
+
 def doctor(args: argparse.Namespace) -> int:
     config_path = Path(args.config)
     local_config_path = Path(args.local_config) if args.local_config else None
@@ -725,6 +925,15 @@ def doctor(args: argparse.Namespace) -> int:
         else:
             add("warn", "artifact-git-policy", f"add {pattern} to .gitignore or set commit_artifacts_by_default=true")
 
+    if platform == "feishu-project" and project_key and work_item_type:
+        try:
+            query = build_feishu_mql(config)
+            add("ok", "feishu-mql", f"{len(query['select_fields'])} fields, limit {config_value(config, 'query_policy.limit', 20)}")
+            if query["exact_field_config_keys"]:
+                add("ok", "field-discovery-keys", ", ".join(query["exact_field_config_keys"]))
+        except Exception as exc:  # pragma: no cover - defensive diagnostics
+            add("warn", "feishu-mql", f"could not build query: {exc}")
+
     if args.json:
         print(json.dumps({"checks": checks}, ensure_ascii=False, indent=2))
     else:
@@ -740,6 +949,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", default=".bugflow/issues")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    init_parser = subparsers.add_parser("init-project", help="Create starter bugflow config files for this repository.")
+    init_parser.add_argument("--platform", default="feishu-project")
+    init_parser.add_argument("--project-name", default="")
+    init_parser.add_argument("--project-key", default="")
+    init_parser.add_argument("--work-item-type", default="issue")
+    init_parser.add_argument("--repo-key", default="current-repo")
+    init_parser.add_argument("--role", default="frontend")
+    init_parser.add_argument("--schema", default=".codex/bugflow/schema.yaml")
+    init_parser.add_argument("--force", action="store_true", help="Overwrite existing config files.")
+    init_parser.add_argument("--skip-gitignore", action="store_true", help="Do not add the bugflow artifact root to .gitignore.")
+    init_parser.set_defaults(func=init_project)
+
     fetch_parser = subparsers.add_parser("fetch-json", help="Import tracker JSON into bugflow issue artifacts.")
     fetch_parser.add_argument("--input", help="Raw or normalized issue JSON file. Reads stdin when omitted.")
     fetch_parser.add_argument("--platform", default="feishu-project")
@@ -754,6 +975,11 @@ def build_parser() -> argparse.ArgumentParser:
     daily_parser.add_argument("--platform", default="feishu-project")
     daily_parser.add_argument("--report", help="Optional markdown report output path.")
     daily_parser.set_defaults(func=daily)
+
+    mql_parser = subparsers.add_parser("feishu-mql", help="Print a minimal Feishu Project MQL query from config.")
+    mql_parser.add_argument("--json", action="store_true", help="Print machine-readable query metadata.")
+    mql_parser.add_argument("--use-status-ids", action="store_true", help="Use configured status ids instead of labels in WHERE.")
+    mql_parser.set_defaults(func=feishu_mql)
 
     doctor_parser = subparsers.add_parser("doctor", help="Check config, schema, and artifact git-ignore policy.")
     doctor_parser.add_argument("--json", action="store_true", help="Print machine-readable checks.")

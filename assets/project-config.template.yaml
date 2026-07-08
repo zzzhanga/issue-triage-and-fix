@@ -24,20 +24,21 @@ field_mapping:
   reporter: reporter
   priority: priority
   description: description
-  requirements: requirement
+  requirements: requirements
   attachments: attachments
   created_at: created_at
   updated_at: updated_at
 
 requirement_mapping:
   enabled: true
-  issue_requirement_field: requirement
+  issue_requirement_field: requirements
   current_repo:
     repo_key: current-repo
     path: .
     aliases:
       - current repo
-      - admin
+      - web client
+      - current service
   related_repositories: []
   demand_rules: []
   confirmation_policy:

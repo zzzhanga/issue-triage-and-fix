@@ -25,6 +25,7 @@
 - 读取 `AGENTS.md` 和 `.codex/bugflow/` 下的项目配置。
 - 使用 Codex 内置 Python 运行 `bugflow_runner.py doctor`，不要先用系统 `python` 再用 `uv` 兜底；报告 warn/error，有 error 时停止。
 - 如果 `doctor` 中 `field-mapping`、`requirement-field` 和 `status-codes` 都是 ok，后续拉取应信任项目配置，不要再做全量字段发现。
+- 使用 `bugflow_runner.py feishu-mql --json` 从配置生成本次最小 SELECT 和精确字段配置 key。
 - 只有 MQL 报字段错误、配置缺字段，或用户明确要求重新发现字段时，才用字段配置工具做精确查询。
 - 拉取分配给当前用户、状态为待修复或重新打开的工单。
 - 包含关联需求、标题、状态、优先级、描述、截图/附件、负责人和更新时间。
@@ -60,12 +61,13 @@
 定时分诊应优先走快路径，避免把一次日报变成探索式会话：
 
 1. 用 Codex 内置 Python 跑 `doctor`。
-2. 用 MCP 查本次待处理 issue。
-3. 把本次查询结果转成标准 JSON。
-4. 用 `bugflow_runner.py daily --input <json> --report .bugflow/daily-report.md` 更新工件和日报。
-5. 输出日报摘要。
+2. 用 `feishu-mql --json` 生成本次最小查询。
+3. 用 MCP 查本次待处理 issue。
+4. 把本次查询结果转成标准 JSON。
+5. 用 `bugflow_runner.py daily --input <json> --report .bugflow/daily-report.md` 更新工件和日报。
+6. 输出日报摘要。
 
-`search_by_mql` 返回 `moql_field_list` 时，可以直接把该记录传给 runner；runner 会按字段 key 扁平化。为保证表格信息完整，SELECT 至少包含 `work_item_id`、`auto_number`、`name`、`work_item_status`、`priority`、`owner`、`current_status_operator`、`field_eea32c` 或 `start_time`、`updated_at`、`_field_linked_story`、`description` 和 `field_696151`。
+`search_by_mql` 返回 `moql_field_list` 时，可以直接把该记录传给 runner；runner 会保留顶层字段并按字段 key 扁平化。为保证表格信息完整，SELECT 至少包含配置里映射的 `id`、`number`、`title`、`status`、`priority`、`reporter`、`assignee`、`created_at`、`updated_at`、`requirements`、`description` 和 `attachments`。
 
 不要在快路径中读取 automation memory、重新探索可用工具、扫描历史 bugflow 目录、运行 build/lint、打开浏览器或做代码修复。
 
@@ -76,9 +78,9 @@
 推荐顺序：
 
 1. 先跑 `doctor`。
-2. `doctor` 全 ok 时，按配置中的字段 key 执行最小 SELECT。
+2. `doctor` 全 ok 时，运行 `feishu-mql --json`，按配置中的字段 key 执行最小 SELECT。
 3. 如果 MQL 报字段错误，只修正报错字段。
-4. 需要校验字段配置时，使用精确字段 key 查询，例如 `work_item_status`、`_field_linked_story`、`field_696151`，不要先做模糊或全量查询。
+4. 需要校验字段配置时，使用 `feishu-mql --json` 返回的 `exact_field_config_keys` 做精确查询，不要先做模糊或全量查询。
 5. 把“字段映射不清”和“需求/仓库归属不清”分开报告；前者是配置问题，后者是业务判断问题。
 
 ## 何时升级到修复任务
