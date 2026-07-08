@@ -17,9 +17,11 @@ STANDARD_FIELDS = {
     "status": ["status", "work_item_status", "state"],
     "priority": ["priority", "severity"],
     "assignee": ["assignee", "current_status_operator", "owner"],
+    "reporter": ["reporter", "owner", "created_by", "creator"],
     "description": ["description", "body", "content"],
     "requirements": ["requirements", "_field_linked_story", "requirement", "demand", "story", "related_requirement", "需求"],
     "attachments": ["attachments", "files", "field_696151"],
+    "created_at": ["created_at", "created", "created_time", "start_time", "field_eea32c"],
     "updated_at": ["updated_at", "updated", "modified_at"],
     "source_url": ["source_url", "url", "link", "web_url"],
 }
@@ -47,6 +49,55 @@ def first_present(data: dict[str, Any], candidates: list[str]) -> Any:
         if value not in (None, ""):
             return value
     return None
+
+
+def normalize_user(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": value.get("user_key") or value.get("id"),
+        "name": value.get("name") or value.get("name_cn") or value.get("name_en") or value.get("email"),
+    }
+
+
+def extract_moql_value(field: dict[str, Any]) -> Any:
+    value = field.get("value")
+    if not isinstance(value, dict):
+        return value
+    if "string_value" in value:
+        return value["string_value"]
+    if "long_value" in value:
+        return value["long_value"]
+    if "bool_value" in value:
+        return value["bool_value"]
+    if "double_value" in value:
+        return value["double_value"]
+    if "user_value" in value and isinstance(value["user_value"], dict):
+        return normalize_user(value["user_value"])
+    if "user_value_list" in value and isinstance(value["user_value_list"], list):
+        return [normalize_user(item) if isinstance(item, dict) else item for item in value["user_value_list"]]
+    if "option_value" in value and isinstance(value["option_value"], dict):
+        option = value["option_value"]
+        return {"id": option.get("key") or option.get("id"), "label": option.get("label") or option.get("name")}
+    if "option_value_list" in value and isinstance(value["option_value_list"], list):
+        return [
+            {"id": item.get("key") or item.get("id"), "label": item.get("label") or item.get("name")}
+            if isinstance(item, dict)
+            else item
+            for item in value["option_value_list"]
+        ]
+    if len(value) == 1:
+        return next(iter(value.values()))
+    return value
+
+
+def flatten_moql_record(issue: dict[str, Any]) -> dict[str, Any]:
+    fields = issue.get("moql_field_list")
+    if not isinstance(fields, list):
+        return issue
+    flattened: dict[str, Any] = {}
+    for field in fields:
+        if isinstance(field, dict) and field.get("key"):
+            flattened[str(field["key"])] = extract_moql_value(field)
+    return flattened
 
 
 def normalize_assignee(value: Any) -> Any:
@@ -83,6 +134,8 @@ def normalize_requirements(value: Any) -> list[dict[str, Any]]:
 
 
 def normalize_issue(issue: dict[str, Any], platform: str, mapping: dict[str, str]) -> dict[str, Any]:
+    raw_issue = issue
+    issue = flatten_moql_record(issue)
     normalized: dict[str, Any] = {"source": platform}
 
     for field, candidates in STANDARD_FIELDS.items():
@@ -95,9 +148,10 @@ def normalize_issue(issue: dict[str, Any], platform: str, mapping: dict[str, str
         normalized[field] = value
 
     normalized["assignee"] = normalize_assignee(normalized.get("assignee"))
+    normalized["reporter"] = normalize_assignee(normalized.get("reporter"))
     normalized["requirements"] = normalize_requirements(normalized.get("requirements"))
     normalized["attachments"] = normalized.get("attachments") or []
-    normalized["raw"] = issue
+    normalized["raw"] = raw_issue.get("raw", raw_issue) if raw_issue.get("source") == platform else raw_issue
     return normalized
 
 

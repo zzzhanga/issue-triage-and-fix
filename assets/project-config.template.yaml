@@ -21,10 +21,12 @@ field_mapping:
   title: name
   status: work_item_status
   assignee: current_status_operator
+  reporter: reporter
   priority: priority
   description: description
   requirements: requirement
   attachments: attachments
+  created_at: created_at
   updated_at: updated_at
 
 requirement_mapping:

@@ -85,6 +85,77 @@ def issue_key(issue: dict[str, Any]) -> str:
     return str(key)
 
 
+def display_scalar(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, dict):
+        return str(value.get("label") or value.get("name") or value.get("title") or value.get("id") or "")
+    if isinstance(value, list):
+        return " / ".join(display_scalar(item) for item in value if display_scalar(item))
+    return str(value)
+
+
+def issue_requirement_label(issue: dict[str, Any]) -> str:
+    requirements = issue.get("requirements") or []
+    labels: list[str] = []
+    for req in requirements:
+        if isinstance(req, dict):
+            req_id = req.get("id") or ""
+            title = req.get("title") or ""
+            label = " / ".join(part for part in (str(req_id), str(title)) if part)
+            if label:
+                labels.append(label)
+        elif req:
+            labels.append(str(req))
+    return "；".join(labels)
+
+
+def issue_people(issue: dict[str, Any], key: str) -> str:
+    value = issue.get(key)
+    if isinstance(value, list):
+        people: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                people.append(str(item.get("name") or item.get("id") or ""))
+            elif item:
+                people.append(str(item))
+        return " / ".join(person for person in people if person)
+    if isinstance(value, dict):
+        return str(value.get("name") or value.get("id") or "")
+    return str(value or "")
+
+
+def issue_date_label(issue: dict[str, Any]) -> str:
+    created = issue.get("created_at")
+    updated = issue.get("updated_at")
+    if created and updated and str(created) != str(updated):
+        return f"创建 {created}<br>更新 {updated}"
+    return str(updated or created or "")
+
+
+def recommendation_label(readiness: str, effort: str, risk: str) -> str:
+    if readiness == "auto-fix-candidate":
+        prefix = "safe-candidate"
+    elif readiness == "manual-review-first":
+        prefix = "manual-review-first"
+    elif readiness == "ask-for-confirmation":
+        prefix = "needs-confirmation"
+    elif readiness == "redirect-to-owner":
+        prefix = "redirect-owner"
+    else:
+        prefix = readiness
+    return f"{prefix} / {effort} / {risk}"
+
+
+def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    if not rows:
+        return "无"
+    header = "| " + " | ".join(headers) + " |"
+    separator = "| " + " | ".join("---" for _ in headers) + " |"
+    body = ["| " + " | ".join(cell.replace("\n", "<br>") for cell in row) + " |" for row in rows]
+    return "\n".join([header, separator, *body])
+
+
 def artifact_path(issue_root: Path, artifact_id: str) -> Path:
     for artifact in ARTIFACTS:
         if artifact["id"] == artifact_id:
@@ -398,7 +469,14 @@ def triage_issue_dir(config: dict[str, Any], issue_root: Path) -> dict[str, Any]
     )
     return {
         "issue": issue.get("number") or issue.get("id"),
+        "id": issue.get("id") or "",
         "title": issue.get("title") or "",
+        "status": display_scalar(issue.get("status")),
+        "priority": display_scalar(issue.get("priority")),
+        "reporter": issue_people(issue, "reporter"),
+        "assignee": issue_people(issue, "assignee"),
+        "date": issue_date_label(issue),
+        "requirement": issue_requirement_label(issue),
         "repository_match": match["repository_match"],
         "confidence": match["confidence"],
         "ownership": triage["ownership"],
@@ -430,32 +508,64 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
     needs = [item for item in results if item["confirmation_required"] or item["readiness"] == "ask-for-confirmation"]
     redirects = [item for item in results if item["readiness"] == "redirect-to-owner"]
 
-    def rows(items: list[dict[str, Any]]) -> str:
+    def table(items: list[dict[str, Any]]) -> str:
         if not items:
             return "无"
-        return "\n".join(
-            f"- {item['issue']} {item['title']} | {item['repository_match']} | {item['effort']} | {item['risk']}"
-            for item in items
+        return markdown_table(
+            ["缺陷", "标题", "优先级", "状态", "提出/更新", "报告人/负责人", "推荐"],
+            [
+                [
+                    "<br>".join(str(part) for part in (item.get("id"), item.get("issue")) if part),
+                    item.get("title") or "",
+                    item.get("priority") or "",
+                    item.get("status") or "",
+                    item.get("date") or "",
+                    " / ".join(part for part in (item.get("reporter"), item.get("assignee")) if part),
+                    recommendation_label(item["readiness"], item["effort"], item["risk"]),
+                ]
+                for item in items
+            ],
         )
 
     questions = "\n".join(f"- {item['issue']}: {item['question']}" for item in needs if item.get("question")) or "无"
+    summary_parts = [
+        f"本次查询到 {len(results)} 个缺陷",
+        f"安全候选 {len(auto)} 个",
+        f"需人工评审 {len(manual)} 个",
+        f"需确认 {len(needs)} 个",
+        f"建议转交 {len(redirects)} 个",
+    ]
+    evidence = "；".join(
+        f"{item['issue']}：{item['repository_match']} / {item['ownership']} / {item['readiness']}"
+        for item in results
+    ) or "无"
     return f"""# 每日 bug 分诊报告
+
+{ "，".join(summary_parts) }。本次未修改飞书状态、未修改代码、未提交/建分支。
+
+## 缺陷总览
+
+{table(results)}
 
 ## 可人工批准后修复
 
-{rows(auto)}
+{table(auto)}
 
 ## 需人工评审后再决定
 
-{rows(manual)}
+{table(manual)}
 
 ## 需要客户/产品确认
 
-{rows(needs)}
+{table(needs)}
 
 ## 建议转交
 
-{rows(redirects)}
+{table(redirects)}
+
+## 证据与判断
+
+{evidence}
 
 ## 确认问题
 

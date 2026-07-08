@@ -30,8 +30,30 @@
 - 包含关联需求、标题、状态、优先级、描述、截图/附件、负责人和更新时间。
 - 生成或更新 `.bugflow/issues/<bug-number>/` 工件。
 - 只处理本次拉取到的 bug；不要扫描 `.bugflow/issues` 下的历史目录混入日报。
-- 输出每日分诊报告：新增 bug、需要人工评审、需要确认、非当前仓库、安全修复候选。
+- 输出每日分诊报告：先给缺陷总览表格，再给证据与判断、推荐修复顺序、需要确认事项；不要用大段过程日志替代表格。
 - 明确安全边界：不索要密钥、不改远程状态、不改代码、不提交。
+
+## 输出格式
+
+最终回复应表格优先，适合每天扫一眼：
+
+```markdown
+本次 Feishu Project MCP 查询到 `project.work_item_type` 当前登录用户负责、状态“待修复/重新打开”的缺陷共 N 条：
+
+| 缺陷 | 标题 | 优先级 | 状态 | 提出/更新 | 报告人/负责人 | 推荐 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 28079 / 7028343260 | 标题 | P1 | 待修复 | 创建 ...<br>更新 ... | 报告人 / 负责人 | manual-review-first / medium / medium |
+
+证据与判断：...
+
+推荐修复顺序：...
+
+需要进一步确认：...
+
+本次未修改飞书状态、未修改代码、未创建分支或提交；仅更新了自动化记忆和 bugflow 工件。
+```
+
+只在异常时简述 `doctor`、MCP、字段发现等过程细节。正常成功时不要把命令执行过程放在正文前面。
 
 ## 快路径
 
@@ -42,6 +64,8 @@
 3. 把本次查询结果转成标准 JSON。
 4. 用 `bugflow_runner.py daily --input <json> --report .bugflow/daily-report.md` 更新工件和日报。
 5. 输出日报摘要。
+
+`search_by_mql` 返回 `moql_field_list` 时，可以直接把该记录传给 runner；runner 会按字段 key 扁平化。为保证表格信息完整，SELECT 至少包含 `work_item_id`、`auto_number`、`name`、`work_item_status`、`priority`、`owner`、`current_status_operator`、`field_eea32c` 或 `start_time`、`updated_at`、`_field_linked_story`、`description` 和 `field_696151`。
 
 不要在快路径中读取 automation memory、重新探索可用工具、扫描历史 bugflow 目录、运行 build/lint、打开浏览器或做代码修复。
 

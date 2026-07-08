@@ -27,10 +27,12 @@ field_mapping:
   title: name
   status: work_item_status
   assignee: current_status_operator
+  reporter: owner
   priority: priority
   description: description
   requirements: _field_linked_story
   attachments: field_696151
+  created_at: start_time
   updated_at: updated_at
 
 requirement_mapping:
