@@ -53,15 +53,19 @@ actions:
   plan:
     creates:
       - fix-plan
+    runner_command: plan-fix
   apply:
     creates:
       - implementation
+    runner_command: record-implementation
   verify:
     creates:
       - verification
+    runner_command: record-verification
   close:
     creates:
       - closure
+    runner_command: close-local
   update:
     creates: []
   status:

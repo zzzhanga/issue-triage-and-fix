@@ -29,7 +29,7 @@ STANDARD_FIELDS = {
 
 def load_json(path: str | None) -> Any:
     if path:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     return json.load(sys.stdin)
 
 

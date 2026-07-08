@@ -14,6 +14,20 @@ Before editing:
 
 Do not repair issues classified as `hard`, `blocked`, `needs-confirmation`, or `not-current-repo` without explicit approval for that issue.
 
+## Controlled Fix-One Commands
+
+Use the runner to keep fix-one work resumable:
+
+```powershell
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --approved
+python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-123 --summary "..." --files src/file.ts
+python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --command "pnpm exec eslint src/file.ts => passed" --browser passed --browser-note "Route checked"
+python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-123 --summary "Fixed locally and verified"
+```
+
+`plan-fix` must run before code edits. If it writes `fix-plan.md` with `status: blocked`, stop and ask for the missing approval or product/customer confirmation. Use `--approved` only when the user explicitly selected that issue for repair or approved the plan.
+
 ## Start Work
 
 If `remote_status_policy.default_change_to_in_progress` is true and the `start_fix` transition is allowed, move the issue to the configured in-progress status before code edits. Otherwise, mention that no status change was made.
@@ -27,6 +41,7 @@ If the status update fails, continue only when local repair is still useful and 
 - Avoid broad refactors unless required for the bug.
 - Add or update tests only when behavior risk justifies them.
 - Do not introduce new global styles for page-specific issues unless the shared component is the true source.
+- After edits, run `record-implementation` with the changed files and a concise summary. This command records what happened; it does not inspect git or change remote state.
 
 ## Local Verification
 
@@ -39,6 +54,8 @@ Run the verification commands from project config. Use targeted commands first:
 - build only when configured or risk warrants it
 
 If a command cannot run, capture the reason and continue with other applicable verification.
+
+After verification, run `record-verification`. Mark failed or blocked verification explicitly with `--failed`, `--blocked`, or `--browser failed/blocked`.
 
 ## Browser Verification
 
@@ -81,6 +98,8 @@ Move the issue to resolved-for-acceptance, completed, or terminated only when:
 - project config allows the transition or the user explicitly approves it.
 
 If verification is partial, leave the issue in progress and comment with the remaining risk.
+
+Use `close-local` only after `verification.md` is `done`. Use `--allow-partial` only when the final answer clearly states verification is partial and no remote resolved/completed transition was made.
 
 ## Final Response
 

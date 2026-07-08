@@ -8,6 +8,7 @@ Use this reference before changing a remote issue status.
 - Prefer changing to in-progress before a controlled repair when allowed.
 - Require explicit permission or config for resolved, completed, or terminated transitions.
 - Never transition blocked, unclear, or cross-owner issues as if they were repaired.
+- `close-local` only writes `closure.md`; it is not a remote status update.
 
 ## Config Fields
 

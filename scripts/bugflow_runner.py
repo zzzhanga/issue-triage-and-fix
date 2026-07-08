@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""Bugflow v1 runner：导入工单、生成分诊工件、输出每日分诊报告。
+"""Bugflow v2 runner：初始化配置、导入工单、分诊、记录受控修复闭环。
 
 这个 runner 故意不修改代码、不修改远程工单状态。它的职责是把飞书/MCP/导出的
-工单 JSON 转成可恢复的 bugflow 工件，并用项目配置做需求-仓库匹配和初步分诊。
+工单 JSON 转成可恢复的 bugflow 工件，并用项目配置做需求-仓库匹配、初步分诊、
+修复计划、实现记录、验证记录和本地闭环摘要。
 """
 
 from __future__ import annotations
@@ -61,7 +62,7 @@ def config_value(config: dict[str, Any], path: str, default: Any = None) -> Any:
 
 def load_json_payload(path: str | None) -> Any:
     if path:
-        return json.loads(Path(path).read_text(encoding="utf-8"))
+        return json.loads(Path(path).read_text(encoding="utf-8-sig"))
     return json.load(sys.stdin)
 
 
@@ -229,6 +230,28 @@ def set_frontmatter_status(markdown: str, artifact_id: str, status: str) -> str:
 
 def write_markdown_artifact(path: Path, artifact_id: str, status: str, body: str) -> None:
     path.write_text(f"---\nartifact: {artifact_id}\nstatus: {status}\n---\n\n{body}", encoding="utf-8")
+
+
+def artifact_frontmatter_status(path: Path) -> str:
+    if not path.exists():
+        return "missing"
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return "unknown"
+    parts = text.split("---", 2)
+    if len(parts) < 3:
+        return "unknown"
+    for line in parts[1].splitlines():
+        if line.startswith("status:"):
+            return line.split(":", 1)[1].strip()
+    return "unknown"
+
+
+def load_issue(issue_root: Path) -> dict[str, Any]:
+    issue_path = issue_root / "issue.json"
+    if not issue_path.exists():
+        raise SystemExit(f"Missing issue.json: {issue_path}")
+    return json.loads(issue_path.read_text(encoding="utf-8"))
 
 
 def scaffold_issue_dir(root: Path, issue: dict[str, Any]) -> Path:
@@ -641,6 +664,300 @@ def daily(args: argparse.Namespace) -> int:
     return 0
 
 
+def effort_rank(effort: str) -> int:
+    return {"easy": 1, "medium": 2, "hard": 3, "blocked": 99}.get(effort, 99)
+
+
+def repair_gate(config: dict[str, Any], item: dict[str, Any], approved: bool) -> tuple[str, list[str]]:
+    blockers: list[str] = []
+    if not bool(config_value(config, "execution_policy.auto_fix_allowed", True)) and not approved:
+        blockers.append("execution_policy.auto_fix_allowed is false; needs explicit approval.")
+    if item.get("confirmation_required") and not approved:
+        blockers.append("Requirement/repository ownership still needs confirmation.")
+    if item.get("readiness") != "auto-fix-candidate" and not approved:
+        blockers.append(f"Readiness is {item.get('readiness')}; needs explicit approval for fix-one.")
+    max_effort = str(config_value(config, "execution_policy.max_auto_fix_effort", "medium"))
+    if effort_rank(str(item.get("effort") or "blocked")) > effort_rank(max_effort) and not approved:
+        blockers.append(f"Effort is {item.get('effort')}; exceeds max_auto_fix_effort={max_effort}.")
+    return ("done" if not blockers else "blocked", blockers)
+
+
+def issue_summary_line(issue: dict[str, Any]) -> str:
+    return f"{issue.get('number') or issue.get('id')} / {issue.get('id') or ''} - {issue.get('title') or ''}".strip()
+
+
+def configured_verification_steps(config: dict[str, Any]) -> list[str]:
+    steps: list[str] = []
+    verification = config.get("verification") or {}
+    for key in ("format_write", "format_check", "lint", "stylelint", "test"):
+        value = verification.get(key)
+        if value:
+            steps.append(f"{key}: {value}")
+    build = verification.get("build")
+    if build and verification.get("run_build_by_default"):
+        steps.append(f"build: {build}")
+    elif build:
+        steps.append(f"build: {build}（按风险或用户要求执行）")
+    if config_value(config, "browser_verification.enabled", False):
+        steps.append(f"browser: {config_value(config, 'browser_verification.app_url', '<app-url>')}")
+    return steps
+
+
+def render_fix_plan(
+    config: dict[str, Any],
+    issue: dict[str, Any],
+    item: dict[str, Any],
+    approved: bool,
+    blockers: list[str],
+    args: argparse.Namespace,
+) -> str:
+    files = "\n".join(f"- {file}" for file in args.files) if args.files else "- 待代码搜索后确认"
+    verification = "\n".join(f"- {step}" for step in configured_verification_steps(config)) or "- 按项目配置选择适用验证命令"
+    blocker_lines = "\n".join(f"- {blocker}" for blocker in blockers) or "- 无"
+    approval = "已显式批准" if approved else "未显式批准"
+    route = args.route or "待确认"
+    notes = args.notes or "无"
+    return f"""# 修复计划
+
+## 工单
+
+- {issue_summary_line(issue)}
+- 状态: {display_scalar(issue.get('status'))}
+- 优先级: {display_scalar(issue.get('priority'))}
+- 关联需求: {issue_requirement_label(issue) or '无'}
+
+## 修复门禁
+
+- 仓库匹配: {triage_display_label(str(item.get('repository_match') or ''))}
+- 责任归属: {triage_display_label(str(item.get('ownership') or ''))}
+- 推荐: {recommendation_label(str(item.get('readiness') or ''), str(item.get('effort') or ''), str(item.get('risk') or ''))}
+- 批准状态: {approval}
+- 阻塞项:
+{blocker_lines}
+
+## 预计改动范围
+
+{files}
+
+## 实施步骤
+
+1. 读取项目规则和相关代码，确认不覆盖用户未提交改动。
+2. 复现或定位工单描述中的问题路径。
+3. 做最小范围修复，优先复用项目现有组件、工具函数和样式模式。
+4. 更新必要的 mock、类型、测试或回归脚本。
+5. 运行下面的验证计划，并把结果写入 `verification.md`。
+
+## 验证计划
+
+{verification}
+
+## 浏览器路线
+
+- 路由/场景: {route}
+- 登录策略: 按项目 `login_policy.method_priority`，不在聊天或工件中保存密码。
+
+## 远程工单策略
+
+- 默认不修改远程状态。
+- 只有项目配置或用户明确允许时，才进入 `status-workflow.md` 的状态流转。
+
+## 备注
+
+{notes}
+"""
+
+
+def plan_fix(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    item = triage_issue_dir(config, target)
+    status, blockers = repair_gate(config, item, args.approved)
+    write_markdown_artifact(
+        artifact_path(target, "fix-plan"),
+        "fix-plan",
+        status,
+        render_fix_plan(config, issue, item, args.approved, blockers, args),
+    )
+    result = {
+        "issue": args.issue,
+        "artifact": normalize_relative_path(artifact_path(target, "fix-plan")),
+        "status": status,
+        "approved": args.approved,
+        "blockers": blockers,
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0 if status == "done" else 2
+
+
+def render_implementation(issue: dict[str, Any], args: argparse.Namespace) -> str:
+    files = "\n".join(f"- {file}" for file in args.files) if args.files else "- 未记录"
+    summaries = args.summary or ["未填写"]
+    summary = "\n".join(f"- {item}" for item in summaries)
+    notes = args.notes or "无"
+    blocked = args.blocked or "无"
+    return f"""# 实现记录
+
+## 工单
+
+- {issue_summary_line(issue)}
+
+## 修改摘要
+
+{summary}
+
+## 修改文件
+
+{files}
+
+## 远程状态
+
+- {args.remote_status or '未修改'}
+
+## 阻塞/异常
+
+{blocked}
+
+## 备注
+
+{notes}
+"""
+
+
+def record_implementation(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    status = "blocked" if args.blocked else "done"
+    write_markdown_artifact(
+        artifact_path(target, "implementation"),
+        "implementation",
+        status,
+        render_implementation(issue, args),
+    )
+    print(json.dumps({"issue": args.issue, "artifact": normalize_relative_path(artifact_path(target, "implementation")), "status": status}, ensure_ascii=False, indent=2))
+    return 0 if status == "done" else 2
+
+
+def render_verification(issue: dict[str, Any], args: argparse.Namespace) -> str:
+    commands = args.command or ["未运行"]
+    command_lines = "\n".join(f"- {command}" for command in commands)
+    evidence = "\n".join(f"- {item}" for item in (args.evidence or [])) or "- 无"
+    blocked = args.blocked or "无"
+    return f"""# 验证记录
+
+## 工单
+
+- {issue_summary_line(issue)}
+
+## 命令验证
+
+{command_lines}
+
+## 浏览器验证
+
+- 结果: {args.browser}
+- 说明: {args.browser_note or '无'}
+
+## 证据
+
+{evidence}
+
+## 剩余风险
+
+{args.residual_risk or '无'}
+
+## 阻塞/失败
+
+{blocked}
+"""
+
+
+def verification_status(args: argparse.Namespace) -> str:
+    if args.blocked or args.failed or args.browser in ("failed", "blocked"):
+        return "blocked"
+    return "done"
+
+
+def record_verification(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    status = verification_status(args)
+    write_markdown_artifact(
+        artifact_path(target, "verification"),
+        "verification",
+        status,
+        render_verification(issue, args),
+    )
+    print(json.dumps({"issue": args.issue, "artifact": normalize_relative_path(artifact_path(target, "verification")), "status": status}, ensure_ascii=False, indent=2))
+    return 0 if status == "done" else 2
+
+
+def render_closure(issue: dict[str, Any], verification_state: str, args: argparse.Namespace) -> str:
+    return f"""# 闭环记录
+
+## 工单
+
+- {issue_summary_line(issue)}
+
+## 本地结论
+
+- {args.summary or '未填写'}
+
+## 验证状态
+
+- {verification_state}
+
+## 远程评论
+
+- {args.remote_comment or '未发布'}
+
+## 远程状态
+
+- {args.remote_status or '未修改'}
+
+## 剩余风险
+
+{args.residual_risk or '无'}
+
+## 后续事项
+
+{args.follow_up or '无'}
+"""
+
+
+def close_local(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    verification_state = artifact_frontmatter_status(artifact_path(target, "verification"))
+    status = "done" if verification_state == "done" or args.allow_partial else "blocked"
+    write_markdown_artifact(
+        artifact_path(target, "closure"),
+        "closure",
+        status,
+        render_closure(issue, verification_state, args),
+    )
+    print(
+        json.dumps(
+            {
+                "issue": args.issue,
+                "artifact": normalize_relative_path(artifact_path(target, "closure")),
+                "status": status,
+                "verification_status": verification_state,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0 if status == "done" else 2
+
+
 def normalize_relative_path(path: Path) -> str:
     return str(path).replace("\\", "/").removeprefix("./")
 
@@ -969,6 +1286,44 @@ def build_parser() -> argparse.ArgumentParser:
     triage_parser = subparsers.add_parser("triage", help="Generate requirement-match and triage artifacts.")
     triage_parser.add_argument("--issue", help="Issue number/id. Defaults to all issue directories.")
     triage_parser.set_defaults(func=triage)
+
+    plan_parser = subparsers.add_parser("plan-fix", help="Create a controlled fix plan for one issue.")
+    plan_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    plan_parser.add_argument("--approved", action="store_true", help="Mark this issue as explicitly approved for fix-one.")
+    plan_parser.add_argument("--files", nargs="*", default=[], help="Expected files or areas to inspect/change.")
+    plan_parser.add_argument("--route", default="", help="Browser route or workflow to verify.")
+    plan_parser.add_argument("--notes", default="", help="Additional planning notes.")
+    plan_parser.set_defaults(func=plan_fix)
+
+    impl_parser = subparsers.add_parser("record-implementation", help="Record implementation notes after code edits.")
+    impl_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    impl_parser.add_argument("--summary", action="append", help="Implementation summary bullet. Repeat as needed.")
+    impl_parser.add_argument("--files", nargs="*", default=[], help="Changed files.")
+    impl_parser.add_argument("--remote-status", default="未修改", help="Remote status action summary.")
+    impl_parser.add_argument("--notes", default="", help="Additional notes.")
+    impl_parser.add_argument("--blocked", default="", help="Concrete blocker or failure, if any.")
+    impl_parser.set_defaults(func=record_implementation)
+
+    verify_parser = subparsers.add_parser("record-verification", help="Record local and browser verification results.")
+    verify_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    verify_parser.add_argument("--command", action="append", help="Verification command and result. Repeat as needed.")
+    verify_parser.add_argument("--browser", choices=["not-required", "passed", "failed", "blocked", "skipped"], default="not-required")
+    verify_parser.add_argument("--browser-note", default="", help="Browser verification note.")
+    verify_parser.add_argument("--evidence", action="append", help="Evidence note or screenshot path. Repeat as needed.")
+    verify_parser.add_argument("--residual-risk", default="无", help="Residual risk after verification.")
+    verify_parser.add_argument("--failed", action="store_true", help="Mark verification as failed.")
+    verify_parser.add_argument("--blocked", default="", help="Concrete blocker, if any.")
+    verify_parser.set_defaults(func=record_verification)
+
+    close_parser = subparsers.add_parser("close-local", help="Write local closure summary without changing remote state.")
+    close_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    close_parser.add_argument("--summary", default="", help="Local closure conclusion.")
+    close_parser.add_argument("--remote-comment", default="未发布", help="Remote comment action summary.")
+    close_parser.add_argument("--remote-status", default="未修改", help="Remote status action summary.")
+    close_parser.add_argument("--residual-risk", default="无", help="Residual risk.")
+    close_parser.add_argument("--follow-up", default="", help="Follow-up items.")
+    close_parser.add_argument("--allow-partial", action="store_true", help="Allow closure when verification is not done.")
+    close_parser.set_defaults(func=close_local)
 
     daily_parser = subparsers.add_parser("daily", help="Import JSON, triage, and print a daily report.")
     daily_parser.add_argument("--input", help="Raw or normalized issue JSON file. Reads stdin when omitted.")
