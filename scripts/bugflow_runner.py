@@ -134,17 +134,48 @@ def issue_date_label(issue: dict[str, Any]) -> str:
 
 
 def recommendation_label(readiness: str, effort: str, risk: str) -> str:
-    if readiness == "auto-fix-candidate":
-        prefix = "safe-candidate"
-    elif readiness == "manual-review-first":
-        prefix = "manual-review-first"
-    elif readiness == "ask-for-confirmation":
-        prefix = "needs-confirmation"
-    elif readiness == "redirect-to-owner":
-        prefix = "redirect-owner"
-    else:
-        prefix = readiness
-    return f"{prefix} / {effort} / {risk}"
+    readiness_labels = {
+        "auto-fix-candidate": "可批准后修复",
+        "manual-review-first": "需人工评审",
+        "ask-for-confirmation": "需进一步确认",
+        "redirect-to-owner": "建议转交",
+    }
+    effort_labels = {
+        "easy": "低难度",
+        "medium": "中等难度",
+        "hard": "高难度",
+        "blocked": "暂不可修",
+    }
+    risk_labels = {
+        "low": "低风险",
+        "medium": "中风险",
+        "high": "高风险",
+    }
+    return " / ".join(
+        (
+            readiness_labels.get(readiness, readiness),
+            effort_labels.get(effort, effort),
+            risk_labels.get(risk, risk),
+        )
+    )
+
+
+def triage_display_label(value: str) -> str:
+    labels = {
+        "current-repo": "当前仓库",
+        "multi-repo-unclear": "多仓库归属待确认",
+        "other-repo": "其他仓库",
+        "unmatched": "未匹配",
+        "low-confidence": "低置信匹配",
+        "frontend-owned": "前端负责",
+        "needs-confirmation": "需要确认",
+        "not-current-repo": "非当前仓库",
+        "auto-fix-candidate": "可批准后修复",
+        "manual-review-first": "需人工评审",
+        "ask-for-confirmation": "需进一步确认",
+        "redirect-to-owner": "建议转交",
+    }
+    return labels.get(value, value)
 
 
 def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
@@ -536,7 +567,8 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
         f"建议转交 {len(redirects)} 个",
     ]
     evidence = "；".join(
-        f"{item['issue']}：{item['repository_match']} / {item['ownership']} / {item['readiness']}"
+        f"{item['issue']}：{triage_display_label(item['repository_match'])} / "
+        f"{triage_display_label(item['ownership'])} / {triage_display_label(item['readiness'])}"
         for item in results
     ) or "无"
     return f"""# 每日 bug 分诊报告
