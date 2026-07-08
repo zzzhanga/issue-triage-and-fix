@@ -29,12 +29,23 @@ Do not ask for a password. Do not store tokens, cookies, MCP URLs, or user keys 
 
 Use project config field mappings when present.
 
+If `bugflow_runner.py doctor` confirms `field-mapping`, `requirement-field`, and `status-codes` as ok, trust the project config for routine daily triage. Do not run broad field discovery just because a field config query returns an empty list. Treat an empty broad field-config response as an MCP/query issue unless the actual MQL query also fails.
+
 If a query fails or the project differs from the known mapping:
 
-1. Fetch work item field config for the project and work item type.
+1. Fetch work item field config for the project and work item type with exact field keys first.
 2. Confirm every status option id/code from the `work_item_status` field config. Do not infer status ids from labels or screenshots.
 3. Confirm assignee/current-operator, requirement/demand, description, priority, attachment, and updated-time fields.
 4. Rebuild queries using field keys and option ids, not display labels.
+
+For `ai-rays.issue`, this exact field-config query is known to return the key fields:
+
+```text
+project_key=ai-rays
+work_item_type=issue
+field_keys=["work_item_status", "_field_linked_story", "field_696151"]
+page_num=1
+```
 
 ## Common Feishu Fields
 
