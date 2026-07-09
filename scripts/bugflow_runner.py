@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -433,6 +434,35 @@ def classify_issue(config: dict[str, Any], issue: dict[str, Any], match: dict[st
         risk = "low"
         readiness = "auto-fix-candidate"
         reason = "需求与当前仓库匹配，工单描述暂无明显跨系统风险。"
+        if any(
+            word in title_desc
+            for word in (
+                "样式",
+                "布局",
+                "间距",
+                "对齐",
+                "颜色",
+                "字号",
+                "展示",
+                "显示",
+                "溢出",
+                "遮挡",
+                "固定列",
+                "滚动",
+                "按钮",
+                "图标",
+                "css",
+                "style",
+                "layout",
+                "overflow",
+                "align",
+            )
+        ):
+            ownership = "frontend-owned"
+            effort = "easy"
+            risk = "low"
+            readiness = "auto-fix-candidate"
+            reason = "当前仓库匹配，且描述符合纯前端样式/布局/展示类低风险修复。"
         if any(word in title_desc for word in ("权限", "登录", "接口", "api", "数据库", "支付", "迁移")):
             effort = "medium"
             risk = "medium"
@@ -815,6 +845,10 @@ def render_implementation(issue: dict[str, Any], args: argparse.Namespace) -> st
 
 - {args.remote_status or '未修改'}
 
+## 本地提交
+
+- {args.commit or '未创建'}
+
 ## 阻塞/异常
 
 {blocked}
@@ -920,6 +954,10 @@ def render_closure(issue: dict[str, Any], verification_state: str, args: argpars
 
 - {args.remote_status or '未修改'}
 
+## 本地提交
+
+- {args.commit or '未创建'}
+
 ## 剩余风险
 
 {args.residual_risk or '无'}
@@ -956,6 +994,97 @@ def close_local(args: argparse.Namespace) -> int:
         )
     )
     return 0 if status == "done" else 2
+
+
+def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", *args],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def ensure_files_inside_cwd(files: list[str]) -> None:
+    cwd = Path.cwd().resolve()
+    for file in files:
+        if not file or file.startswith("-"):
+            raise SystemExit(f"Invalid file path for commit-fix: {file}")
+        resolved = (cwd / file).resolve() if not Path(file).is_absolute() else Path(file).resolve()
+        if not resolved.is_relative_to(cwd):
+            raise SystemExit(f"Refusing to stage path outside repository cwd: {file}")
+
+
+def commit_message_from_issue(config: dict[str, Any], issue: dict[str, Any], template: str | None) -> str:
+    issue_number = str(issue.get("number") or issue.get("id") or "issue")
+    title = str(issue.get("title") or "fix issue").strip()
+    message_template = template or str(config_value(config, "git_policy.commit_message_template", "fix({issue}): {title}"))
+    message = message_template.format(issue=issue_number, id=issue.get("id") or issue_number, title=title)
+    return " ".join(message.split())
+
+
+def commit_fix(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    if not bool(config_value(config, "git_policy.auto_commit_after_fix", True)) and not args.force:
+        raise SystemExit("git_policy.auto_commit_after_fix is false; use --force only after explicit approval.")
+    if not args.files:
+        raise SystemExit("commit-fix requires --files so only fix-related files are staged.")
+    ensure_files_inside_cwd(args.files)
+
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    verification_state = artifact_frontmatter_status(artifact_path(target, "verification"))
+    if verification_state != "done" and not args.allow_unverified:
+        raise SystemExit(f"Verification is {verification_state}; run record-verification first or use --allow-unverified.")
+
+    status = run_git(["status", "--porcelain", "--", *args.files])
+    if status.returncode != 0:
+        raise SystemExit(status.stderr.strip() or status.stdout.strip() or "git status failed")
+    if not status.stdout.strip():
+        raise SystemExit("No changes found in the specified files.")
+
+    message = commit_message_from_issue(config, issue, args.message)
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "issue": args.issue,
+                    "message": message,
+                    "files": args.files,
+                    "status": status.stdout.splitlines(),
+                    "dry_run": True,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+        return 0
+
+    add = run_git(["add", "--", *args.files])
+    if add.returncode != 0:
+        raise SystemExit(add.stderr.strip() or add.stdout.strip() or "git add failed")
+    commit = run_git(["commit", "-m", message])
+    if commit.returncode != 0:
+        raise SystemExit(commit.stderr.strip() or commit.stdout.strip() or "git commit failed")
+    rev = run_git(["rev-parse", "--short", "HEAD"])
+    commit_hash = rev.stdout.strip() if rev.returncode == 0 else ""
+    print(
+        json.dumps(
+            {
+                "issue": args.issue,
+                "message": message,
+                "files": args.files,
+                "commit": commit_hash,
+                "pushed": False,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
 
 
 def normalize_relative_path(path: Path) -> str:
@@ -1300,6 +1429,7 @@ def build_parser() -> argparse.ArgumentParser:
     impl_parser.add_argument("--summary", action="append", help="Implementation summary bullet. Repeat as needed.")
     impl_parser.add_argument("--files", nargs="*", default=[], help="Changed files.")
     impl_parser.add_argument("--remote-status", default="未修改", help="Remote status action summary.")
+    impl_parser.add_argument("--commit", default="", help="Local git commit hash or message.")
     impl_parser.add_argument("--notes", default="", help="Additional notes.")
     impl_parser.add_argument("--blocked", default="", help="Concrete blocker or failure, if any.")
     impl_parser.set_defaults(func=record_implementation)
@@ -1320,10 +1450,20 @@ def build_parser() -> argparse.ArgumentParser:
     close_parser.add_argument("--summary", default="", help="Local closure conclusion.")
     close_parser.add_argument("--remote-comment", default="未发布", help="Remote comment action summary.")
     close_parser.add_argument("--remote-status", default="未修改", help="Remote status action summary.")
+    close_parser.add_argument("--commit", default="", help="Local git commit hash or message.")
     close_parser.add_argument("--residual-risk", default="无", help="Residual risk.")
     close_parser.add_argument("--follow-up", default="", help="Follow-up items.")
     close_parser.add_argument("--allow-partial", action="store_true", help="Allow closure when verification is not done.")
     close_parser.set_defaults(func=close_local)
+
+    commit_parser = subparsers.add_parser("commit-fix", help="Create a local git commit for one verified fix.")
+    commit_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    commit_parser.add_argument("--files", nargs="+", required=True, help="Fix-related files to stage and commit.")
+    commit_parser.add_argument("--message", default="", help="Override commit message.")
+    commit_parser.add_argument("--dry-run", action="store_true", help="Show staged files and message without committing.")
+    commit_parser.add_argument("--force", action="store_true", help="Allow commit when git_policy.auto_commit_after_fix is false.")
+    commit_parser.add_argument("--allow-unverified", action="store_true", help="Allow commit when verification.md is not done.")
+    commit_parser.set_defaults(func=commit_fix)
 
     daily_parser = subparsers.add_parser("daily", help="Import JSON, triage, and print a daily report.")
     daily_parser.add_argument("--input", help="Raw or normalized issue JSON file. Reads stdin when omitted.")

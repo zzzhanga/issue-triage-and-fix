@@ -116,7 +116,8 @@ python <skill-dir>\scripts\bugflow_runner.py daily --input feishu-bugs.json --re
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-28814 --summary "..." --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-28814 --command "pnpm exec eslint src/file.ts => passed"
+python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-28814 --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-28814 --summary "Fixed locally and verified"
 ```
 
-The runner creates starter config with `init-project`, checks local setup with `doctor`, generates Feishu MQL from config with `feishu-mql`, imports JSON, creates or updates artifacts, performs deterministic requirement-to-repository matching, writes `requirement-match.md` and `triage.md`, prints a daily report, and records controlled fix-one work in `fix-plan.md`, `implementation.md`, `verification.md`, and `closure.md`. It does not edit code or update remote issue status.
+The runner creates starter config with `init-project`, checks local setup with `doctor`, generates Feishu MQL from config with `feishu-mql`, imports JSON, creates or updates artifacts, performs deterministic requirement-to-repository matching, writes `requirement-match.md` and `triage.md`, prints a daily report, records controlled fix-one work in `fix-plan.md`, `implementation.md`, `verification.md`, and `closure.md`, and can create one local git commit for a verified single-bug fix with `commit-fix`. It does not edit code, push, or update remote issue status.

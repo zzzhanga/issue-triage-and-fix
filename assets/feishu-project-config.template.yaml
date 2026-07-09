@@ -194,6 +194,7 @@ remote_status_policy:
 
 execution_policy:
   auto_fix_allowed: true
+  auto_fix_low_risk_frontend: true
   max_auto_fix_effort: medium
   require_confirmation_for:
     - hard
@@ -201,6 +202,13 @@ execution_policy:
     - needs-confirmation
     - not-current-repo
     - backend-contract-change
+
+git_policy:
+  auto_commit_after_fix: true
+  commit_after_verification_only: true
+  stage_policy: touched-files-only
+  push_after_commit: false
+  commit_message_template: "fix({issue}): {title}"
 
 comment_template:
   enabled: true

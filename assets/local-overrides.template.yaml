@@ -19,8 +19,8 @@ login_policy:
     - env_test_account
     - mock_token
   test_account_env:
-    username: QIKAN_TEST_USERNAME
-    password: QIKAN_TEST_PASSWORD
+    username: PROJECT_TEST_USERNAME
+    password: PROJECT_TEST_PASSWORD
 
 remote_status_policy:
   # Users can make automation stricter locally, for example set update_status_allowed to false.
@@ -30,3 +30,8 @@ remote_status_policy:
   default_resolve_for_acceptance: false
   default_complete: false
   default_terminate: false
+
+git_policy:
+  # Users can make automation stricter locally.
+  auto_commit_after_fix: true
+  push_after_commit: false

@@ -23,6 +23,7 @@ python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --approved
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-123 --summary "..." --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --command "pnpm exec eslint src/file.ts => passed" --browser passed --browser-note "Route checked"
+python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-123 --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-123 --summary "Fixed locally and verified"
 ```
 
@@ -41,6 +42,7 @@ If the status update fails, continue only when local repair is still useful and 
 - Avoid broad refactors unless required for the bug.
 - Add or update tests only when behavior risk justifies them.
 - Do not introduce new global styles for page-specific issues unless the shared component is the true source.
+- Pure frontend style/layout/display bugs may be repaired automatically when triage marks them `auto-fix-candidate`, the current repo is the owner, and no product/API/backend semantics are involved.
 - After edits, run `record-implementation` with the changed files and a concise summary. This command records what happened; it does not inspect git or change remote state.
 
 ## Local Verification
@@ -56,6 +58,23 @@ Run the verification commands from project config. Use targeted commands first:
 If a command cannot run, capture the reason and continue with other applicable verification.
 
 After verification, run `record-verification`. Mark failed or blocked verification explicitly with `--failed`, `--blocked`, or `--browser failed/blocked`.
+
+## Local Commit
+
+When verification is done and `git_policy.auto_commit_after_fix` is true, create one local commit for the single bug:
+
+```powershell
+python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-123 --files src/file.ts src/file.scss
+```
+
+Rules:
+
+- Stage only fix-related files passed with `--files`.
+- Do not stage `.bugflow/` unless the project explicitly commits artifacts.
+- Do not stage unrelated user changes.
+- Do not push by default; `git_policy.push_after_commit` is false unless a project explicitly changes it.
+- Use the configured `git_policy.commit_message_template`, defaulting to `fix({issue}): {title}`.
+- If verification is not done, `commit-fix` must fail unless `--allow-unverified` is explicitly used and the final response calls out partial verification.
 
 ## Browser Verification
 

@@ -62,6 +62,7 @@ The repo-scoped config should contain project/team facts that should not be rewr
 - `remote_status_policy`: team-level status/comment update policy.
 - `status_transitions`: named transitions such as start and finish.
 - `execution_policy`: what may be auto-fixed.
+- `git_policy`: whether verified single-bug fixes should create a local commit, and how commit messages are formatted.
 - `comment_template`: standard remote comment shape.
 - `bugflow`: artifact root, schema path, and whether issue work artifacts are committed.
 
@@ -166,6 +167,21 @@ Commands may include placeholders:
 - `<issue-route>`
 
 Resolve placeholders before running. If a command is not applicable, explain why.
+
+## Git Policy
+
+Use `git_policy` to control local commits after a verified fix:
+
+```yaml
+git_policy:
+  auto_commit_after_fix: true
+  commit_after_verification_only: true
+  stage_policy: touched-files-only
+  push_after_commit: false
+  commit_message_template: "fix({issue}): {title}"
+```
+
+Keep `push_after_commit` false unless the team explicitly wants automation to push. Even when commits are enabled, only stage the files touched for the selected bug.
 
 ## Project Overrides
 
