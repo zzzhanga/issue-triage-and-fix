@@ -43,14 +43,14 @@ Do not ask for a password. Do not store tokens, cookies, MCP URLs, or user keys 
 
 Use project config field mappings when present.
 
-If `bugflow_runner.py doctor` confirms `field-mapping`, `requirement-field`, and `status-codes` as ok, trust the project config for routine daily triage. Do not run broad field discovery just because a field config query returns an empty list. Treat an empty broad field-config response as an MCP/query issue unless the actual MQL query also fails.
+`doctor` reports local mapping and remote field verification separately. A mapped key is not considered remotely verified until an exact field-config response confirms it and the key/source/time are recorded under `field_verification`. Do not run broad field discovery on every scan, but do not pass unverified optional fields to MQL merely because they exist in `field_mapping`.
 
 If a query fails or the project differs from the known mapping:
 
 1. Fetch work item field config for the project and work item type with exact field keys first.
 2. Confirm every status option id/code from the `work_item_status` field config. Do not infer status ids from labels or screenshots.
 3. Confirm assignee/current-operator, requirement/demand, description, priority, attachment, and updated-time fields.
-4. Rebuild queries using field keys and option ids, not display labels.
+4. Record confirmed keys in `field_verification.verified_keys` with `source` and `verified_at`, then rebuild queries using field keys and option ids, not display labels.
 
 When the project config is incomplete, query exact field keys first:
 
@@ -85,13 +85,14 @@ Treat this as a default only. Project config overrides it.
 
 ## Generate MQL From Config
 
-Use the runner to generate the minimum query from project config:
+Use the runner to generate a profile-specific minimum query from project config:
 
 ```powershell
-python <skill-dir>\scripts\bugflow_runner.py feishu-mql
+python <skill-dir>\scripts\bugflow_runner.py feishu-mql --profile preview
+python <skill-dir>\scripts\bugflow_runner.py feishu-mql --profile fix-ready --json
 ```
 
-The command prints:
+`preview` keeps only candidate identity/filter fields plus remotely verified list fields. `fix-ready` may add remotely verified reporter, creation time, description, requirements, and attachments for one selected issue. The command prints:
 
 - the MQL SELECT list
 - the status filter values
@@ -101,7 +102,7 @@ Use `--json` when passing the query metadata to another script or scheduled task
 
 ## Default MQL Shape
 
-Use this shape for "my pending issues" when the mapping matches:
+Use this shape for "my pending issues" only when every optional selected key was remotely verified:
 
 ```sql
 SELECT `work_item_id`, `auto_number`, `name`, `current_status_operator`, `work_item_status`, `priority`, `description`, `<attachment-field>`, `updated_at`, `<requirement-field>`
@@ -114,7 +115,9 @@ LIMIT 20
 
 Replace `PROJECT_KEY`, `WORK_ITEM_TYPE`, field names, status values, and limit from project config. Feishu MQL may require display labels in `WHERE` even when field config exposes option ids; if MQL rejects the status condition, only adjust the `WHERE` status value and keep the verified field keys unchanged.
 
-Add the configured requirement/demand field to the SELECT list when available. If the list query omits linked requirements, fetch the full work item before repository matching.
+Add the configured requirement/demand field to the SELECT list only when it is remotely verified. If `query_policy.requirement_ids` or `--requirement-id` is set, keep `requirement_mql_pushdown_verified: false` by default and let the runner post-filter normalized requirement id/number/URL values. Enable pushdown only after the requirement field and matching semantics are both verified. If the list query omits linked requirements, fetch the full selected work item before repository matching.
+
+`search_by_mql` may return records below `data -> <group-id> -> moql_field_list[]`. Pass the complete response to the runner; it extracts each grouped record instead of treating the response wrapper as one issue. After normalization, still enforce the current-user filter. When `current_login_user()` was used without a concrete alias, every record needs a readable assignee and all records must share a common current-user identity; otherwise stop rather than accepting a mixed batch.
 
 ## Inbound Evidence
 

@@ -17,7 +17,7 @@ Use this reference for both fast provisional scanning and strict fix-ready class
 
 ## Inputs
 
-- Preview: candidate/list JSON, current-user assignee filter, available descriptions/summaries, attachment metadata, and any cheaply available key evidence.
+- Preview: candidate/list JSON, fail-closed current-user assignee filter, optional exact requirement scope, available descriptions/summaries, and any cheaply available key evidence.
 - Fix-ready: normalized issue JSON plus evidence intake containing full detail, all relevant inbound comments/activities, attachment inspection summaries, and explicit `evidence_fetch` completeness.
 - Fix-ready only: report-quality assessment containing confirmed facts, evidence references, missing fields/conflicts, exact questions, feedback targets, and a safe local draft when allowed.
 - Project config.
@@ -109,7 +109,7 @@ Difficulty automating verification does not by itself make a fix high risk. A hi
 
 ## Ranking
 
-In preview, recommend only which issues should enter strict evaluation first, using tracker priority, apparent impact/ownership, blocking dependencies, and recency. Prefix ownership/risk with “疑似/暂定”; never call an item safe to auto-fix.
+In preview, recommend only which issues should enter strict evaluation first, using tracker priority, linked requirement, apparent impact/ownership, blocking dependencies, update time, and recency. Prefix ownership/risk with “疑似/暂定”; never call an item safe to auto-fix. Include a short initial rationale and explicit “升级后需核对项”, not just a recommendation label.
 
 In fix-ready, recommend execution order:
 

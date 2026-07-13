@@ -92,6 +92,7 @@ Store sanitized evidence in `issue.json`; never store temporary download headers
   "report_quality": {
     "status": "sufficient",
     "assessed_at": "2026-07-13T10:10:00+08:00",
+    "hash_version": "1",
     "input_hash": "<hash from report-quality-hash>",
     "facts": ["The video shows the trigger and actual result; comment-7 states the expected result."],
     "evidence_refs": ["attachment repro.mp4@00:08", "comment comment-7"],
@@ -106,12 +107,12 @@ Store sanitized evidence in `issue.json`; never store temporary download headers
 
 Allowed source states are `complete`, `partial`, `not-applicable`, `skipped`, `error`, and `unknown`. Aggregate `evidence_fetch.status` is `complete` only when every decision-relevant source is `complete` or genuinely `not-applicable`, and every decision-relevant attachment has `inspection_state: inspected`.
 
-After collecting the evidence, write the current normalized `issue.json`, run `bugflow_runner.py report-quality-hash --issue <issue>`, and bind the semantic assessment to that value in `report_quality.input_hash`. Then synthesize `report_quality` from the description, comments, inspected media, activities, and authoritative requirement/PRD evidence. Information distributed across these sources can be sufficient even when the original description is sparse. See `report-quality.md` for required content, statuses, and feedback drafting.
+After collecting the evidence, write the current normalized `issue.json`, run `bugflow_runner.py report-quality-hash --issue <issue>`, and bind the semantic assessment to both returned values in `report_quality.hash_version` and `report_quality.input_hash`. Then synthesize `report_quality` from the description, comments, inspected media, activities, and authoritative requirement/PRD evidence. Information distributed across these sources can be sufficient even when the original description is sparse. See `report-quality.md` for required content, statuses, and feedback drafting.
 
 ## Conflicts And Freshness
 
 - Use newer acceptance criteria only when their authority is clear. Otherwise preserve disagreements between the title, comments, requirement, or PRD as `report_quality.status: conflicting` and request a decision.
-- A reopen comment, new attachment, or changed operation record is material evidence. Refresh `issue.json`, recompute `report_quality.input_hash`, re-assess, and invalidate downstream artifacts before continuing.
+- A reopen comment, new attachment, changed operation record, or hash-version change is material. Refresh `issue.json`, recompute `report_quality.hash_version/input_hash`, re-assess, and invalidate downstream artifacts before continuing.
 - Record which source supports each important conclusion: description, comment id, attachment name/timestamp, activity id, requirement, or code search.
 - Keep the evidence summary factual. Do not infer unseen frames, missing comment pages, or inaccessible files.
 

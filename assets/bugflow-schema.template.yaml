@@ -1,5 +1,5 @@
 name: issue-triage-and-fix
-version: 1
+version: 3
 description: Two-level workflow with an artifact-free preview scan by default and strict evidence/report-quality artifacts only after a concrete issue is selected for fix-ready repair.
 
 root: .bugflow/issues
@@ -14,7 +14,7 @@ modes:
 artifacts:
   - id: issue-intake
     generates: issue.json
-    description: Normalized tracker issue with requirement links, observable/reproduction/acceptance fields, inbound comments, activities, inspected attachment summaries, evidence completeness, report-quality status bound to the current evidence input hash, and any safe local clarification draft; raw source data is redacted unless explicitly retained.
+    description: Normalized tracker issue with versioned runner metadata, requirement links, observable/reproduction/acceptance fields, inbound comments, activities, inspected attachment summaries, evidence completeness, report-quality status bound to the current versioned evidence input hash, and any safe local clarification draft; raw source data is redacted unless explicitly retained.
     requires: []
   - id: requirement-match
     generates: requirement-match.md
@@ -38,7 +38,7 @@ artifacts:
       - fix-plan
   - id: verification
     generates: verification.md
-    description: Standard checks or approved lightweight inspection evidence after both intake gates pass, browser result, residual risk, and failures.
+    description: Standard required checks or approved lightweight inspection evidence after both intake gates pass, verification provenance (user/agent/ci), browser result, residual risk, and failures.
     requires:
       - implementation
   - id: closure
@@ -83,3 +83,6 @@ actions:
   report-existing:
     creates: []
     runner_command: daily-existing
+  migrate:
+    creates: []
+    runner_command: migrate-artifacts

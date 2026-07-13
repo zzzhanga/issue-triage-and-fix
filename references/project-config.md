@@ -73,8 +73,9 @@ The repo-scoped config should contain project/team facts that should not be rewr
 - `project`: repository path, docs, role assumption, and local conventions.
 - `issue_source`: tracker platform and project/work-item identifiers.
 - `field_mapping`: source fields for the normalized issue shape.
+- `field_verification`: remote field keys actually confirmed by exact schema discovery, with source and time; local mapping alone is not proof.
 - `requirement_mapping`: how tracker requirements/demands map to this repo and related repos.
-- `query_policy`: assignee, status, limit, and ordering.
+- `query_policy`: assignee, optional exact requirement scope, status, limit, and ordering.
 - `ownership_rules`: project-specific ownership hints.
 - `verification`: local commands and when to run them.
 - `browser_verification`: app URL, browser-surface priority, routes, and visible workflows requiring browser checks.
@@ -92,7 +93,32 @@ Requirement mappings, status ids, and status labels belong in the repo-scoped co
 
 `field_mapping.attachments` maps the work-item attachment field used by MQL/detail reads. Inbound comments and activity records are not ordinary MQL fields: fetch them through the tracker/MCP's dedicated read tools and merge sanitized `comments`, `activities`, and `evidence_fetch` into the normalized payload. Do not add fake `comments` or `activities` field mappings to make a query appear complete.
 
-Use a relative `project.repo_path` such as `.` for repo-scoped configs whenever possible. Put machine-specific absolute paths in local overrides only when a tool cannot resolve the repository root.
+Use a relative `project.repo_path` such as `.` for repo-scoped configs whenever possible. For cross-directory operation pass `--repo-root <repo>` explicitly; pass `--artifact-root <path>` only when generated issue artifacts live elsewhere. These roots are independent and Git/code operations always use the repository root. Put machine-specific absolute paths in local overrides only when a tool cannot resolve the repository root.
+
+Treat `field_mapping` as normalization configuration, not remote-schema verification. Populate this only after an exact field-config read succeeds:
+
+```yaml
+field_verification:
+  verified_keys:
+    - priority
+    - updated_at
+    - _field_linked_story
+  source: list_workitem_field_config exact keys
+  verified_at: 2026-07-13T10:00:00+08:00
+```
+
+The runner always keeps core id/number/title/status/assignee fields needed to identify and safely filter candidates. Optional preview/fix-ready SELECT fields are omitted until remotely verified. `doctor` reports local mapping and remote verification separately.
+
+Limit a run to exact linked requirements when needed:
+
+```yaml
+query_policy:
+  requirement_ids:
+    - REQ-123
+  requirement_mql_pushdown_verified: false
+```
+
+Keep pushdown false until both the remote field key and the connector's matching semantics are verified. With false, the runner post-filters normalized issues by requirement id/number/URL. A command-line `--requirement-id` overrides the configured list for that run.
 
 ## Local Override Config
 
@@ -159,6 +185,7 @@ Use `bugflow` to configure resumable issue work:
 bugflow:
   enabled: true
   root: .bugflow/issues
+  report_root: .bugflow/reports
   schema: .codex/bugflow/schema.yaml
   commit_artifacts_by_default: false
 ```
@@ -200,7 +227,7 @@ Commands may include placeholders:
 
 Resolve placeholders before running. If a command is not applicable, record a structured exemption and its reason. Do not mark verification done from an empty command list or prose such as "looks good". Record each applicable result as `passed`, `failed`, or `blocked`, with the command/type and concise evidence.
 
-Standard verification requires at least one passing applicable check. Plan-approved lightweight verification may finish without an automated pass only when the runner confirms high-confidence current-repo frontend ownership, low/medium risk, easy/medium effort, no unresolved confirmation, a concrete automation-exemption reason, and inspection evidence. Keep `execution_policy.allow_lightweight_verification: true` to enable this path; a local `false` is a hard deny.
+Standard verification is plan-bound: `plan-fix` derives `required_checks` from the changed file types, configured test/build policy, browser route, and visible issue signals. Every named requirement must be `passed`; an unrelated passed command cannot satisfy lint/test/build/browser. `record-verification` also requires `--verified-by user|agent|ci`, records UTC time automatically, and accepts a concise `--verification-note`. Plan-approved lightweight verification may finish without an automated pass only when the runner confirms high-confidence current-repo frontend ownership, low/medium risk, easy/medium effort, no unresolved confirmation, a concrete automation-exemption reason, and inspection evidence. Keep `execution_policy.allow_lightweight_verification: true` to enable this path; a local `false` is a hard deny.
 
 Use `execution_policy.approved_completion_actions` to populate actions shown in a new fix plan by default. The Feishu starter uses `commit`, `start-fix`, and `resolve-for-acceptance`; the exported-JSON starter uses only `commit` because it has no native remote adapter. The actions are not authorized until the exact plan is approved.
 

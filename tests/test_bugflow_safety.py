@@ -55,6 +55,7 @@ def sufficient_report_quality(
     return {
         "status": "sufficient",
         "assessed_at": "2026-07-13T10:05:00+08:00",
+        "hash_version": runner.REPORT_HASH_VERSION,
         "facts": list(facts)
         or ["复现条件、实际结果、期望结果和验收口径已由完整工单证据明确。"],
         "evidence_refs": evidence_refs or ["description"],
@@ -70,6 +71,7 @@ def bind_report_quality(issue: dict[str, object]) -> dict[str, object]:
     quality = issue.get("report_quality")
     if not isinstance(quality, dict):
         raise AssertionError("report_quality must be a dictionary before binding")
+    quality["hash_version"] = runner.REPORT_HASH_VERSION
     quality["input_hash"] = runner.report_quality_input_hash(issue)
     return issue
 
@@ -82,6 +84,7 @@ def current_triage_metadata(
         "evidence_complete": runner.issue_evidence_state(issue)["complete"],
         "report_quality_complete": quality["complete"],
         "report_quality_input_hash": quality["expected_input_hash"],
+        "report_quality_hash_version": runner.REPORT_HASH_VERSION,
         "triage_policy_version": runner.REPORT_QUALITY_POLICY_VERSION,
     }
     metadata.update(overrides)
@@ -977,6 +980,29 @@ class AssigneeFilterTests(unittest.TestCase):
         self.assertEqual(tokens, set())
         self.assertEqual(mode, "explicit-all-assignees")
 
+    def test_native_current_user_rejects_mixed_assignee_batch(self) -> None:
+        issues = [
+            {"id": "1", "assignee": [{"name": "Alice"}]},
+            {"id": "2", "assignee": [{"name": "Bob"}]},
+        ]
+
+        with self.assertRaisesRegex(SystemExit, "mixed assignees"):
+            runner.filter_imported_issues(issues, set(), "native-query-current-user")
+
+    def test_native_current_user_accepts_shared_identity_in_coassignee_batch(self) -> None:
+        issues = [
+            {"id": "1", "assignee": [{"name": "Current User"}, {"name": "Alice"}]},
+            {"id": "2", "assignee": [{"name": "Current User"}, {"name": "Bob"}]},
+        ]
+
+        included, summary = runner.filter_imported_issues(
+            issues, set(), "native-query-current-user"
+        )
+
+        self.assertEqual(included, issues)
+        self.assertEqual(summary["mode"], "native-query-current-user-verified")
+        self.assertEqual(summary["assignees"], ["current user"])
+
 
 class PreviewWorkflowTests(unittest.TestCase):
     @staticmethod
@@ -1221,6 +1247,27 @@ class VerificationTests(unittest.TestCase):
     def test_structured_passed_command_can_complete_non_browser_verification(self) -> None:
         args = self.args(commands=["python -m unittest => passed"])
         self.assertEqual(runner.verification_status(args), "done")
+
+    def test_standard_mode_requires_the_named_plan_checks(self) -> None:
+        args = argparse.Namespace(
+            mode=runner.STANDARD_VERIFICATION_MODE,
+            command=["echo looks-good => passed"],
+            check=None,
+            browser="not-required",
+            blocked="",
+            failed=False,
+            evidence=None,
+        )
+
+        self.assertEqual(
+            runner.verification_status(args, ["lint"], {}),
+            "pending",
+        )
+        args.check = ["lint=passed: exact configured lint completed"]
+        self.assertEqual(
+            runner.verification_status(args, ["lint"], {}),
+            "done",
+        )
 
     def test_lightweight_verification_can_finish_with_inspection_evidence(self) -> None:
         args = self.args(
@@ -1574,6 +1621,48 @@ class MqlSafetyTests(unittest.TestCase):
         self.assertIn("'user''o'", mql)
         self.assertIn("'待''修复'", mql)
 
+    def test_profiles_exclude_unverified_optional_fields(self) -> None:
+        config = self.config()
+        config["field_mapping"].update(
+            {
+                "reporter": "issue_reporter",
+                "requirements": "linked_requirement",
+                "attachments": "attachment_field",
+            }
+        )
+
+        preview = runner.build_feishu_mql(config, profile="preview")
+        fix_ready = runner.build_feishu_mql(config, profile="fix-ready")
+
+        self.assertNotIn("issue_reporter", preview["select_fields"])
+        self.assertNotIn("issue_reporter", fix_ready["select_fields"])
+        self.assertIn("issue_reporter", fix_ready["unverified_optional_fields"])
+
+        config["field_verification"] = {
+            "verified_keys": ["issue_reporter", "linked_requirement", "attachment_field"]
+        }
+        verified = runner.build_feishu_mql(config, profile="fix-ready")
+        self.assertIn("issue_reporter", verified["select_fields"])
+        self.assertIn("attachment_field", verified["select_fields"])
+
+    def test_requirement_scope_uses_post_filter_until_pushdown_is_verified(self) -> None:
+        config = self.config()
+        config["field_mapping"]["requirements"] = "linked_requirement"
+        config["query_policy"]["requirement_ids"] = ["REQ-42"]
+
+        post_filtered = runner.build_feishu_mql(config)
+        self.assertTrue(post_filtered["requirement_post_filter_required"])
+        self.assertNotIn("REQ-42", post_filtered["mql"])
+
+        config["query_policy"]["requirement_mql_pushdown_verified"] = True
+        with self.assertRaisesRegex(SystemExit, "remotely verified"):
+            runner.build_feishu_mql(config)
+
+        config["field_verification"] = {"verified_keys": ["linked_requirement"]}
+        pushed = runner.build_feishu_mql(config)
+        self.assertTrue(pushed["requirement_filter_pushed_down"])
+        self.assertIn("REQ-42", pushed["mql"])
+
 
 class WorkflowDependencyTests(unittest.TestCase):
     @staticmethod
@@ -1920,6 +2009,9 @@ class WorkflowDependencyTests(unittest.TestCase):
                 browser_note="External callback cannot be reproduced locally.",
                 evidence=["Reviewed the scoped diff and callback contract."],
                 residual_risk="Requires acceptance testing with the real callback.",
+                verified_by="agent",
+                verification_note="Reviewed the approved lightweight scope.",
+                check=None,
                 failed=False,
                 blocked="",
             )
@@ -2139,6 +2231,9 @@ class GitCommitSafetyTests(unittest.TestCase):
             browser_note="External callback unavailable" if lightweight else "",
             evidence=["Reviewed the exact scoped diff and callback contract."] if lightweight else None,
             residual_risk="Acceptance test with real callback" if lightweight else "无",
+            verified_by="agent",
+            verification_note="Recorded by the workflow test agent.",
+            check=None,
             failed=False,
             blocked="",
         )
@@ -2548,6 +2643,139 @@ class GitCommitSafetyTests(unittest.TestCase):
                             runner.ensure_files_inside_cwd([invalid])
 
                 runner.ensure_files_inside_cwd(["src/file.py"])
+
+
+class WorkflowHardeningTests(unittest.TestCase):
+    def test_grouped_feishu_mcp_response_extracts_each_record(self) -> None:
+        payload = {
+            "data": {
+                "group-open": [
+                    {"moql_field_list": [{"field_key": "work_item_id", "value": "1"}]},
+                    {"moql_field_list": [{"field_key": "work_item_id", "value": "2"}]},
+                ]
+            }
+        }
+
+        records = runner.iter_payload_items(payload)
+
+        self.assertEqual(len(records), 2)
+        self.assertTrue(all("moql_field_list" in record for record in records))
+
+    def test_flat_data_records_keep_nested_people_inside_the_issue(self) -> None:
+        payload = {
+            "data": [
+                {
+                    "work_item_id": "1",
+                    "name": "Nested assignee",
+                    "current_status_operator": [{"name": "Current User"}],
+                }
+            ]
+        }
+
+        records = runner.iter_payload_items(payload)
+
+        self.assertEqual(records, payload["data"])
+        self.assertEqual(records[0]["current_status_operator"][0]["name"], "Current User")
+
+    def test_requirement_post_filter_matches_id_number_or_url(self) -> None:
+        issues = [
+            {"id": "1", "requirements": [{"id": "REQ-1", "number": "1001"}]},
+            {"id": "2", "requirements": [{"url": "https://tracker/REQ-2"}]},
+            {"id": "3", "requirements": []},
+        ]
+
+        included, summary = runner.filter_requirement_scope(
+            issues, {"1001", "https://tracker/req-2"}
+        )
+
+        self.assertEqual([item["id"] for item in included], ["1", "2"])
+        self.assertEqual(summary["skipped_requirement_count"], 1)
+
+    def test_repo_and_artifact_roots_do_not_depend_on_process_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir, tempfile.TemporaryDirectory() as other_dir:
+            repo = Path(temp_dir) / "repo"
+            repo.mkdir()
+            args = argparse.Namespace(repo_root=str(repo), artifact_root="", root="")
+            config = {"project": {"repo_path": "."}, "bugflow": {"root": ".bugflow/issues"}}
+
+            with working_directory(Path(other_dir)):
+                self.assertEqual(runner.repository_root(config, args), repo.resolve())
+                self.assertEqual(
+                    runner.artifact_root(config, args),
+                    (repo / ".bugflow/issues").resolve(),
+                )
+
+    def test_preview_report_cannot_overwrite_issue_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            args = argparse.Namespace(
+                repo_root=str(repo),
+                artifact_root="",
+                root="",
+                report=".bugflow/issues/BUG-1/triage.md",
+            )
+            config = {
+                "project": {"repo_path": "."},
+                "bugflow": {
+                    "root": ".bugflow/issues",
+                    "report_root": ".bugflow/reports",
+                },
+            }
+
+            with self.assertRaises(SystemExit):
+                runner.write_report(config, args, "unsafe")
+
+            args.report = ".bugflow/reports/preview.md"
+            path = runner.write_report(config, args, "safe")
+            self.assertEqual(path.read_text(encoding="utf-8"), "safe")
+            self.assertEqual(list(path.parent.glob("*.tmp")), [])
+
+    def test_compatible_report_hash_migration_preserves_assessment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "issues"
+            issue = {
+                "id": "BUG-MIGRATE",
+                "number": "BUG-MIGRATE",
+                "title": "Legacy assessment",
+                "requirements": [],
+                "evidence_fetch": complete_evidence(),
+                "report_quality": {
+                    "status": "sufficient",
+                    "assessed_at": "2026-07-13T10:05:00+08:00",
+                    "facts": ["Current evidence is sufficient."],
+                    "evidence_refs": ["description"],
+                    "missing_fields": [],
+                    "conflicts": [],
+                    "questions": [],
+                },
+            }
+            issue["report_quality"]["input_hash"] = runner.report_quality_input_hash(issue)
+            runner.write_issue_json(root, issue)
+            args = argparse.Namespace(
+                config="unused",
+                local_config="",
+                repo_root="",
+                artifact_root="",
+                root=str(root),
+                issue="BUG-MIGRATE",
+            )
+
+            with mock.patch.object(
+                runner, "load_config", return_value={"bugflow": {"root": str(root)}}
+            ), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(runner.migrate_artifacts(args), 0)
+
+            migrated = json.loads(
+                (runner.issue_dir(root, "BUG-MIGRATE") / "issue.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                migrated["report_quality"]["hash_version"], runner.REPORT_HASH_VERSION
+            )
+            self.assertEqual(migrated["report_quality"]["status"], "sufficient")
+            self.assertEqual(
+                migrated["_bugflow_meta"]["artifact_schema_version"],
+                runner.ARTIFACT_SCHEMA_VERSION,
+            )
 
 
 class RawPayloadRedactionTests(unittest.TestCase):

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 # Feishu Project repo-scoped config starter.
 # Put a filled copy in .codex/bugflow/issue-triage.project.yaml by default so it stays local.
@@ -22,6 +22,7 @@ issue_source:
   work_item_type: issue
   default_status: OPEN
   default_status_label: 待修复
+  allow_unverified_optional_fields: false
 
 field_mapping:
   id: work_item_id
@@ -36,6 +37,13 @@ field_mapping:
   attachments: field_696151
   created_at: start_time
   updated_at: updated_at
+
+# Local mapping says how to read a field; it does not prove that the remote
+# project exposes that exact key. Fill these only after exact field discovery.
+field_verification:
+  verified_keys: []
+  source: ""
+  verified_at: ""
 
 requirement_mapping:
   enabled: true
@@ -72,6 +80,7 @@ bugflow:
   # Generated artifacts live here. Add `.bugflow/` to the host repo's .gitignore
   # unless the team intentionally wants to review bugflow artifacts in git.
   root: .bugflow/issues
+  report_root: .bugflow/reports
   # Config/schema stays under `.codex/bugflow/` so it is separate from run output.
   schema: .codex/bugflow/schema.yaml
   commit_artifacts_by_default: false
@@ -79,6 +88,8 @@ bugflow:
 query_policy:
   assigned_to: current_login_user()
   assignee_aliases: []
+  requirement_ids: []
+  requirement_mql_pushdown_verified: false
   status:
     - OPEN
     - REOPENED

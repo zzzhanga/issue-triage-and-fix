@@ -6,8 +6,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
+import tempfile
 import unicodedata
 from pathlib import Path
 from typing import Any
@@ -139,6 +141,8 @@ ARTIFACTS = [
 ]
 
 REPORT_QUALITY_POLICY_VERSION = "2"
+REPORT_HASH_VERSION = "1"
+ARTIFACT_SCHEMA_VERSION = "3"
 REPORT_QUALITY_GATED_ARTIFACTS = {
     "triage-report",
     "fix-plan",
@@ -235,7 +239,7 @@ def replace_frontmatter(path: Path, updates: dict[str, str]) -> None:
     lines.append(f"status: {status}")
     lines.extend(f"{key}: {value}" for key, value in metadata.items() if value != "")
     lines.extend(["---", "", body])
-    path.write_text("\n".join(lines), encoding="utf-8")
+    atomic_write_text(path, "\n".join(lines))
 
 
 def artifact_definition(artifact_id: str) -> dict[str, Any]:
@@ -318,6 +322,7 @@ def effective_artifact_status(issue_root: Path, artifact_id: str) -> str:
             triage.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION
             or triage.get("report_quality_complete") != "true"
             or triage.get("evidence_complete") != "true"
+            or triage.get("report_quality_hash_version") != REPORT_HASH_VERSION
         ):
             return "stale"
     return "done"
@@ -326,13 +331,33 @@ def effective_artifact_status(issue_root: Path, artifact_id: str) -> str:
 def write_if_absent(path: Path, content: str) -> bool:
     if path.exists():
         return False
-    path.write_text(content, encoding="utf-8")
+    atomic_write_text(path, content)
     return True
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def artifact_template(artifact: dict[str, Any]) -> str:
     body = artifact["template"] or ""
-    return f"---\nartifact: {artifact['id']}\nstatus: pending\n---\n\n{body}"
+    return (
+        f"---\nartifact: {artifact['id']}\nstatus: pending\n"
+        f"artifact_schema_version: {ARTIFACT_SCHEMA_VERSION}\n---\n\n{body}"
+    )
 
 
 def init_artifacts(args: argparse.Namespace) -> int:
@@ -371,6 +396,7 @@ def init_artifacts(args: argparse.Namespace) -> int:
         "report_quality": {
             "status": "unknown",
             "assessed_at": None,
+            "hash_version": REPORT_HASH_VERSION,
             "input_hash": "",
             "facts": [],
             "evidence_refs": [],
@@ -379,6 +405,10 @@ def init_artifacts(args: argparse.Namespace) -> int:
             "questions": [],
             "feedback_targets": [],
             "feedback_draft": "",
+        },
+        "_bugflow_meta": {
+            "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+            "generator": "bugflow_artifacts",
         },
         "raw": {},
     }

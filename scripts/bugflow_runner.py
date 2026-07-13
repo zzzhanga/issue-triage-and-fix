@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import argparse
+import datetime as dt
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +39,8 @@ CURRENT_LOGIN_USER = "current_login_user()"
 LIGHTWEIGHT_VERIFICATION_MODE = "lightweight"
 STANDARD_VERIFICATION_MODE = "standard"
 REPORT_QUALITY_POLICY_VERSION = "2"
+REPORT_HASH_VERSION = "1"
+ARTIFACT_SCHEMA_VERSION = "3"
 REPORT_QUALITY_GATED_ARTIFACTS = {
     "triage-report",
     "fix-plan",
@@ -51,6 +56,17 @@ COMPLETION_ACTIONS = {
     "complete",
     "terminate",
 }
+_RUNNER_REVISION: str | None = None
+
+
+def runner_revision() -> str:
+    global _RUNNER_REVISION
+    if _RUNNER_REVISION is None:
+        digest = hashlib.sha256()
+        for name in ("bugflow_runner.py", "bugflow_artifacts.py", "normalize_issue_payload.py"):
+            digest.update((SKILL_ROOT / "scripts" / name).read_bytes())
+        _RUNNER_REVISION = digest.hexdigest()[:12]
+    return _RUNNER_REVISION
 
 
 def load_yaml(path: Path) -> dict[str, Any]:
@@ -165,6 +181,104 @@ def load_config(config_path: Path, local_config_path: Path | None) -> dict[str, 
     return config
 
 
+def cli_repo_root(args: argparse.Namespace) -> Path:
+    raw = str(getattr(args, "repo_root", "") or ".").strip()
+    return Path(raw).expanduser().resolve()
+
+
+def argument_path(args: argparse.Namespace, value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    return path.resolve() if path.is_absolute() else (cli_repo_root(args) / path).resolve()
+
+
+def load_runtime_config(args: argparse.Namespace) -> dict[str, Any]:
+    config_path = argument_path(args, args.config)
+    local_value = str(getattr(args, "local_config", "") or "").strip()
+    local_path = argument_path(args, local_value) if local_value else None
+    return load_config(config_path, local_path)
+
+
+def repository_root(config: dict[str, Any], args: argparse.Namespace) -> Path:
+    cli_value = str(getattr(args, "repo_root", "") or "").strip()
+    raw = cli_value or str(config_value(config, "project.repo_path", ".") or ".")
+    path = Path(raw).expanduser()
+    resolved = path.resolve() if path.is_absolute() else (cli_repo_root(args) / path).resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise SystemExit(f"Repository root does not exist or is not a directory: {resolved}")
+    return resolved
+
+
+def artifact_root(config: dict[str, Any], args: argparse.Namespace) -> Path:
+    explicit = str(getattr(args, "artifact_root", "") or "").strip()
+    legacy = str(getattr(args, "root", "") or "").strip()
+    raw = explicit or legacy or str(config_value(config, "bugflow.root", "") or "") or ".bugflow/issues"
+    path = Path(raw).expanduser()
+    return path.resolve() if path.is_absolute() else (repository_root(config, args) / path).resolve()
+
+
+def protected_report_path(
+    config: dict[str, Any], args: argparse.Namespace, value: str | Path
+) -> Path:
+    repo = repository_root(config, args)
+    artifacts = artifact_root(config, args)
+    configured_root = str(config_value(config, "bugflow.report_root", "") or "").strip()
+    reports_root = Path(configured_root).expanduser() if configured_root else artifacts.parent
+    if not reports_root.is_absolute():
+        reports_root = repo / reports_root
+    reports_root = reports_root.resolve()
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = repo / candidate
+    candidate = candidate.resolve()
+    if candidate.suffix.lower() != ".md":
+        raise SystemExit("Report output must be a Markdown (.md) file.")
+    if not candidate.is_relative_to(reports_root):
+        raise SystemExit(f"Report output must stay inside {reports_root}.")
+    if candidate.is_relative_to(artifacts):
+        raise SystemExit("Report output cannot overwrite a per-issue artifact path.")
+    if any(part.casefold() in {".git", ".codex"} for part in candidate.parts):
+        raise SystemExit("Report output cannot write into .git or .codex configuration paths.")
+    if candidate.exists() and candidate.is_symlink():
+        raise SystemExit("Report output cannot replace a symbolic link.")
+    return candidate
+
+
+def write_report(config: dict[str, Any], args: argparse.Namespace, report: str) -> Path | None:
+    value = str(getattr(args, "report", "") or "").strip()
+    if not value:
+        return None
+    path = protected_report_path(config, args, value)
+    atomic_write_text(path, report)
+    return path
+
+
+def atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_name = ""
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary.write(text)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+            temporary_name = temporary.name
+        os.replace(temporary_name, path)
+    finally:
+        if temporary_name and Path(temporary_name).exists():
+            Path(temporary_name).unlink()
+
+
+def utc_now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat()
+
+
 def config_value(config: dict[str, Any], path: str, default: Any = None) -> Any:
     current: Any = config
     for part in path.split("."):
@@ -189,8 +303,7 @@ def write_text_file(path: Path, text: str, force: bool = False) -> str:
     existed = path.exists()
     if existed and not force:
         return "skipped"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)
     return "updated" if existed else "created"
 
 
@@ -201,16 +314,57 @@ def read_asset(name: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _wrapper_payload_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    if isinstance(value.get("moql_field_list"), list):
+        return [value]
+    record_keys = {
+        "id",
+        "issue_id",
+        "work_item_id",
+        "number",
+        "auto_number",
+        "title",
+        "name",
+        "summary",
+    }
+    if record_keys & value.keys():
+        return [value]
+    for key in ("issues", "items", "records"):
+        if key in value:
+            records = _wrapper_payload_items(value[key])
+            if records:
+                return records
+    records: list[dict[str, Any]] = []
+    for child in value.values():
+        if isinstance(child, (dict, list)):
+            records.extend(_wrapper_payload_items(child))
+    return records
+
+
 def iter_payload_items(payload: Any) -> list[dict[str, Any]]:
-    if isinstance(payload, dict):
-        for key in ("issues", "data", "items", "records"):
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, dict)]
-        return [payload]
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
-    raise SystemExit("Input must be a JSON object or array.")
+    if not isinstance(payload, dict):
+        raise SystemExit("Input must be a JSON object or array.")
+    if isinstance(payload.get("moql_field_list"), list):
+        return [payload]
+    for key in ("issues", "items", "records"):
+        if key in payload:
+            records = _wrapper_payload_items(payload[key])
+            if records:
+                return records
+    if "data" in payload:
+        records = _wrapper_payload_items(payload["data"])
+        if records:
+            return records
+        raise SystemExit(
+            "Input data wrapper contains no readable issue records; expected a list or grouped moql_field_list records."
+        )
+    return [payload]
 
 
 def field_mapping(config: dict[str, Any]) -> dict[str, str]:
@@ -321,20 +475,36 @@ def import_assignee_filter(
 def filter_imported_issues(
     issues: list[dict[str, Any]], assignee_tokens: set[str], mode: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not assignee_tokens:
+    effective_tokens = set(assignee_tokens)
+    if not effective_tokens and mode == "native-query-current-user":
+        identity_sets = [person_identity_tokens(issue.get("assignee")) for issue in issues]
+        if any(not identities for identities in identity_sets):
+            raise SystemExit(
+                "Cannot verify current-user scope: a Feishu record has no readable assignee. "
+                "Configure query_policy.assignee_aliases or pass --assignee."
+            )
+        if identity_sets:
+            effective_tokens = set.intersection(*identity_sets)
+        if issues and not effective_tokens:
+            raise SystemExit(
+                "Cannot verify current-user scope: the Feishu payload contains mixed assignees with no common identity. "
+                "Configure the current user's name/id alias or pass --assignee instead of trusting the batch."
+            )
+        mode = "native-query-current-user-verified"
+    if not effective_tokens:
         included = list(issues)
     else:
         included = [
             issue
             for issue in issues
-            if person_identity_tokens(issue.get("assignee")) & assignee_tokens
+            if person_identity_tokens(issue.get("assignee")) & effective_tokens
         ]
     return included, {
         "mode": mode,
         "input_count": len(issues),
         "included_count": len(included),
         "skipped_assignee_count": len(issues) - len(included),
-        "assignees": sorted(assignee_tokens),
+        "assignees": sorted(effective_tokens),
     }
 
 
@@ -429,6 +599,8 @@ def write_markdown_artifact(
         "artifact": artifact_id,
         "status": status,
         "dependency_hash": dependency_fingerprint(path.parent, artifact_id),
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "runner_revision": runner_revision(),
     }
     fields.update(metadata or {})
     frontmatter = ["---"]
@@ -441,8 +613,9 @@ def write_markdown_artifact(
             rendered = str(value)
         frontmatter.append(f"{key}: {rendered}")
     frontmatter.extend(["---", "", body])
-    path.write_text("\n".join(frontmatter), encoding="utf-8")
-    if old_content is not None and old_content != path.read_bytes():
+    content = "\n".join(frontmatter)
+    atomic_write_text(path, content)
+    if old_content is not None and old_content != content.encode("utf-8"):
         invalidate_downstream(path.parent, artifact_id)
 
 
@@ -483,6 +656,7 @@ def artifact_effective_status(issue_root: Path, artifact_id: str) -> str:
         triage_metadata.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION
         or triage_metadata.get("report_quality_complete") != "true"
         or triage_metadata.get("evidence_complete") != "true"
+        or triage_metadata.get("report_quality_hash_version") != REPORT_HASH_VERSION
         or triage_metadata.get("report_quality_input_hash") != report_state["expected_input_hash"]
     ):
         return "blocked"
@@ -515,6 +689,10 @@ def require_artifact_done(issue_root: Path, artifact_id: str, action: str) -> No
                     raise SystemExit(
                         f"Cannot {action}: triage uses an older report-quality policy; regenerate triage first."
                     )
+                if triage_metadata.get("report_quality_hash_version") != REPORT_HASH_VERSION:
+                    raise SystemExit(
+                        f"Cannot {action}: triage uses an older report-quality hash version; migrate and regenerate triage first."
+                    )
         raise SystemExit(f"Cannot {action}: {artifact_id} is {status}; regenerate it first.")
 
 
@@ -539,9 +717,14 @@ def scaffold_issue_dir(root: Path, issue: dict[str, Any]) -> Path:
 def write_issue_json(root: Path, issue: dict[str, Any]) -> Path:
     target = scaffold_issue_dir(root, issue)
     issue_path = target / "issue.json"
-    content = json.dumps(issue, ensure_ascii=False, indent=2) + "\n"
+    stored_issue = dict(issue)
+    stored_issue["_bugflow_meta"] = {
+        "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+        "runner_revision": runner_revision(),
+    }
+    content = json.dumps(stored_issue, ensure_ascii=False, indent=2) + "\n"
     old_content = issue_path.read_text(encoding="utf-8") if issue_path.exists() else None
-    issue_path.write_text(content, encoding="utf-8")
+    atomic_write_text(issue_path, content)
     if old_content is not None and old_content != content:
         invalidate_downstream(target, "issue-intake")
     return target
@@ -793,10 +976,12 @@ def issue_report_quality_state(issue: dict[str, Any]) -> dict[str, Any]:
     missing_fields = [item for item in missing_fields if item not in (None, "")]
     conflicts = [item for item in conflicts if item not in (None, "")]
     assessed_at = str(quality.get("assessed_at") or "").strip()
+    hash_version = str(quality.get("hash_version") or "").strip()
     expected_input_hash = report_quality_input_hash(issue)
     input_hash = str(quality.get("input_hash") or quality.get("assessment_input_hash") or "").strip()
     assessment_current = (
         declared_status != "unknown"
+        and hash_version == REPORT_HASH_VERSION
         and bool(input_hash)
         and input_hash == expected_input_hash
     )
@@ -813,9 +998,14 @@ def issue_report_quality_state(issue: dict[str, Any]) -> dict[str, Any]:
         evidence_refs = []
         missing_fields = []
         conflicts = []
-        questions = [
-            "工单证据已变化或本次评估未绑定当前证据快照；请重新核对详情、评论和附件后更新 report_quality.input_hash。"
-        ]
+        if hash_version != REPORT_HASH_VERSION:
+            questions = [
+                "工单完整度评估缺少当前 report_quality.hash_version；请先运行 migrate-artifacts，若迁移无法确认兼容则重新核对证据并分诊。"
+            ]
+        else:
+            questions = [
+                "工单证据已变化或本次评估未绑定当前证据快照；请重新核对详情、评论和附件后更新 report_quality.input_hash。"
+            ]
     elif not assessed_at and declared_status != "unknown":
         assessment_current = False
         status = "unknown"
@@ -894,6 +1084,7 @@ def issue_report_quality_state(issue: dict[str, Any]) -> dict[str, Any]:
             and not questions
         ),
         "assessed_at": assessed_at,
+        "hash_version": hash_version,
         "input_hash": input_hash,
         "expected_input_hash": expected_input_hash,
         "assessment_current": assessment_current,
@@ -1195,6 +1386,7 @@ def classify_issue(
             "status": "not-assessed",
             "complete": False,
             "assessed_at": "",
+            "hash_version": "",
             "input_hash": "",
             "expected_input_hash": "",
             "assessment_current": False,
@@ -1246,6 +1438,7 @@ def classify_issue(
         "report_quality_status": report_quality_state["status"],
         "report_quality_complete": report_quality_state["complete"],
         "report_quality_assessed_at": report_quality_state["assessed_at"],
+        "report_quality_hash_version": report_quality_state["hash_version"],
         "report_quality_input_hash": report_quality_state["input_hash"],
         "report_quality_expected_input_hash": report_quality_state["expected_input_hash"],
         "report_quality_assessment_current": report_quality_state["assessment_current"],
@@ -1365,10 +1558,10 @@ def render_triage(issue: dict[str, Any], match: dict[str, Any], triage: dict[str
 
 
 def import_json_issues(args: argparse.Namespace) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    config = load_runtime_config(args)
     platform = config_value(config, "issue_source.platform", args.platform)
-    root = Path(config_value(config, "bugflow.root", args.root))
-    payload = load_json_payload(args.input)
+    root = artifact_root(config, args)
+    payload = load_json_payload(str(argument_path(args, args.input)) if args.input else None)
     items = iter_payload_items(payload)
     normalized = [
         normalize_issue(
@@ -1380,15 +1573,25 @@ def import_json_issues(args: argparse.Namespace) -> tuple[list[dict[str, Any]], 
         for item in items
     ]
     assignee_tokens, filter_mode = import_assignee_filter(config, args, str(platform))
-    included, filter_summary = filter_imported_issues(normalized, assignee_tokens, filter_mode)
+    assigned, filter_summary = filter_imported_issues(normalized, assignee_tokens, filter_mode)
+    included, requirement_summary = filter_requirement_scope(
+        assigned, requested_requirement_tokens(config, args)
+    )
+    filter_summary["requirement_filter"] = requirement_summary
+    filter_summary["included_count"] = len(included)
     for issue in included:
+        if getattr(args, "input", None):
+            input_path = argument_path(args, args.input)
+            output_path = issue_dir(root, issue_key(issue)) / "issue.json"
+            if input_path == output_path.resolve():
+                raise SystemExit("Refusing to use the destination issue.json as its own import input.")
         write_issue_json(root, issue)
     return included, filter_summary
 
 
 def fetch_json(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     normalized, filter_summary = import_json_issues(args)
     directories = [str(issue_dir(root, issue_key(issue))) for issue in normalized]
     result = {"count": len(normalized), "directories": directories, "assignee_filter": filter_summary}
@@ -1430,6 +1633,7 @@ def triage_issue_dir(config: dict[str, Any], issue_root: Path) -> dict[str, Any]
             "report_quality_status": triage["report_quality_status"],
             "report_quality_complete": triage["report_quality_complete"],
             "report_quality_input_hash": triage["report_quality_input_hash"],
+            "report_quality_hash_version": triage["report_quality_hash_version"],
             "report_quality_assessment_current": triage["report_quality_assessment_current"],
             "triage_policy_version": REPORT_QUALITY_POLICY_VERSION,
         },
@@ -1480,8 +1684,8 @@ def triage_issue_dir(config: dict[str, Any], issue_root: Path) -> dict[str, Any]
 
 
 def triage(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     if args.issue:
         targets = [issue_dir(root, args.issue)]
     elif root.exists():
@@ -1605,16 +1809,33 @@ def render_preview_markdown(items: list[dict[str, Any]], filter_summary: dict[st
             item.get("title") or "",
             item.get("priority") or "",
             item.get("status") or "",
+            item.get("requirement") or "",
+            item.get("date") or "",
             item.get("assignee") or "",
             triage_display_label(item.get("ownership") or ""),
             risk_labels.get(item.get("risk_hint"), "待判断"),
             quality_labels.get(item.get("preview_report_quality"), "未做正式评估"),
+            item.get("reason") or "",
             item.get("recommendation") or "",
         ]
         for item in items
     ]
     table = markdown_table(
-        ["顺序", "缺陷", "标题", "优先级", "状态", "负责人", "初步归属", "初步风险", "工单信息", "建议"],
+        [
+            "顺序",
+            "缺陷",
+            "标题",
+            "优先级",
+            "状态",
+            "关联需求",
+            "更新",
+            "负责人",
+            "初步归属",
+            "初步风险",
+            "工单信息",
+            "初步依据",
+            "建议",
+        ],
         rows,
     ) if rows else "无"
     hints = "\n".join(
@@ -1645,19 +1866,26 @@ def render_preview_markdown(items: list[dict[str, Any]], filter_summary: dict[st
 - 输入: {filter_summary.get('input_count') or 0}
 - 纳入: {filter_summary.get('included_count') or 0}
 - 跳过其他负责人: {filter_summary.get('skipped_assignee_count') or 0}
+- 需求范围: {', '.join((filter_summary.get('requirement_filter') or {}).get('requirement_ids') or []) or '全部'}
+- 跳过其他需求: {(filter_summary.get('requirement_filter') or {}).get('skipped_requirement_count') or 0}
 """
 
 
 def preview(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    config = load_runtime_config(args)
     platform = config_value(config, "issue_source.platform", args.platform)
-    payload = load_json_payload(args.input)
+    payload = load_json_payload(str(argument_path(args, args.input)) if args.input else None)
     normalized = [
         normalize_issue(item, platform, field_mapping(config), retain_raw=False, include_raw=False)
         for item in iter_payload_items(payload)
     ]
     assignee_tokens, filter_mode = import_assignee_filter(config, args, str(platform))
-    included, filter_summary = filter_imported_issues(normalized, assignee_tokens, filter_mode)
+    assigned, filter_summary = filter_imported_issues(normalized, assignee_tokens, filter_mode)
+    included, requirement_summary = filter_requirement_scope(
+        assigned, requested_requirement_tokens(config, args)
+    )
+    filter_summary["requirement_filter"] = requirement_summary
+    filter_summary["included_count"] = len(included)
     items: list[dict[str, Any]] = []
     for issue in included:
         match = match_requirement(config, issue)
@@ -1719,6 +1947,9 @@ def preview(args: argparse.Namespace) -> int:
             "title": issue.get("title") or "",
             "priority": display_scalar(issue.get("priority")),
             "status": display_scalar(issue.get("status")),
+            "requirement": issue_requirement_label(issue),
+            "date": issue_date_label(issue),
+            "reporter": issue_people(issue, "reporter"),
             "assignee": issue_people(issue, "assignee"),
             "repository_match": match["repository_match"],
             "ownership": triage["ownership"],
@@ -1732,6 +1963,7 @@ def preview(args: argparse.Namespace) -> int:
             }.get(triage["readiness"], "needs-fix-ready-review"),
             "preview_report_quality": quality_status,
             "information_hints": information_hints,
+            "reason": triage["reason"],
             "provisional": True,
             "repair_allowed": False,
             "next_step": "fix-ready",
@@ -1751,10 +1983,7 @@ def preview(args: argparse.Namespace) -> int:
         item["preview_order"] = index
 
     report = render_preview_markdown(items, filter_summary)
-    if args.report:
-        report_path = Path(args.report)
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        report_path.write_text(report, encoding="utf-8")
+    write_report(config, args, report)
     if args.json:
         print(
             json.dumps(
@@ -1769,16 +1998,69 @@ def preview(args: argparse.Namespace) -> int:
 
 
 def report_quality_hash_command(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     print(
         json.dumps(
             {
                 "issue": issue.get("number") or issue.get("id"),
+                "hash_version": REPORT_HASH_VERSION,
                 "input_hash": report_quality_input_hash(issue),
-                "instruction": "Bind the semantic assessment to this exact hash in report_quality.input_hash.",
+                "instruction": (
+                    "Bind report_quality.hash_version and report_quality.input_hash to these exact values."
+                ),
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
+def migrate_artifacts(args: argparse.Namespace) -> int:
+    """Apply only compatibility-preserving metadata migrations for one issue."""
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    quality = issue.get("report_quality")
+    if not isinstance(quality, dict):
+        quality = {}
+        issue["report_quality"] = quality
+
+    declared_status = str(quality.get("status") or "unknown").strip().lower()
+    existing_version = str(quality.get("hash_version") or "").strip()
+    expected_hash = report_quality_input_hash(issue)
+    existing_hash = str(quality.get("input_hash") or quality.get("assessment_input_hash") or "").strip()
+
+    if existing_version and existing_version != REPORT_HASH_VERSION:
+        raise SystemExit(
+            f"Cannot migrate {args.issue}: unsupported report_quality.hash_version={existing_version}; re-assess and re-triage."
+        )
+    if declared_status != "unknown" and existing_hash != expected_hash:
+        raise SystemExit(
+            f"Cannot migrate {args.issue}: the stored report-quality hash does not match current evidence; re-assess and re-triage."
+        )
+
+    metadata = issue.get("_bugflow_meta") if isinstance(issue.get("_bugflow_meta"), dict) else {}
+    changed = (
+        existing_version != REPORT_HASH_VERSION
+        or metadata.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION
+        or metadata.get("runner_revision") != runner_revision()
+    )
+    quality["hash_version"] = REPORT_HASH_VERSION
+    target = write_issue_json(root, issue)
+    print(
+        json.dumps(
+            {
+                "issue": issue.get("number") or issue.get("id"),
+                "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                "report_quality_hash_version": REPORT_HASH_VERSION,
+                "changed": changed,
+                "requires_retriage": changed,
+                "path": str(target),
             },
             ensure_ascii=False,
             indent=2,
@@ -1916,8 +2198,8 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
 
 def daily(args: argparse.Namespace) -> int:
     imported, filter_summary = import_json_issues(args)
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     results = [triage_issue_dir(config, issue_dir(root, issue_key(issue))) for issue in imported]
     report = render_daily_markdown(results)
     report += (
@@ -1927,15 +2209,14 @@ def daily(args: argparse.Namespace) -> int:
         f"- 纳入: {filter_summary['included_count']}\n"
         f"- 跳过其他负责人: {filter_summary['skipped_assignee_count']}\n"
     )
-    if args.report:
-        Path(args.report).write_text(report, encoding="utf-8")
+    write_report(config, args, report)
     print(report)
     return 0
 
 
 def daily_existing(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     issue_keys = list(dict.fromkeys(str(key) for key in args.issue))
     targets = [issue_dir(root, key) for key in issue_keys]
     missing = [str(target) for target in targets if not (target / "issue.json").exists()]
@@ -1982,13 +2263,23 @@ def daily_existing(args: argparse.Namespace) -> int:
         for target, issue in zip(targets, loaded)
         if not assignee_tokens or person_identity_tokens(issue.get("assignee")) & assignee_tokens
     ]
+    assignee_included_count = len(filtered_pairs)
+    requirement_tokens = requested_requirement_tokens(config, args)
+    if requirement_tokens:
+        filtered_pairs = [
+            (target, issue)
+            for target, issue in filtered_pairs
+            if requirement_identity_tokens(issue) & requirement_tokens
+        ]
     filtered_targets = [target for target, _issue in filtered_pairs]
     filter_summary = {
         "mode": filter_mode,
         "input_count": len(loaded),
         "included_count": len(filtered_pairs),
-        "skipped_assignee_count": len(loaded) - len(filtered_pairs),
+        "skipped_assignee_count": len(loaded) - assignee_included_count,
         "assignees": sorted(assignee_tokens),
+        "requirement_ids": sorted(requirement_tokens),
+        "skipped_requirement_count": assignee_included_count - len(filtered_pairs),
     }
     results = [triage_issue_dir(config, target) for target in filtered_targets]
     report = render_daily_markdown(results)
@@ -1996,14 +2287,65 @@ def daily_existing(args: argparse.Namespace) -> int:
         "\n\n## 输入范围\n\n"
         f"- 模式: existing-current-run / {filter_summary['mode']}\n"
         f"- 显式工单数: {len(targets)}\n"
-        f"- 纳入当前负责人: {len(filtered_targets)}\n"
+        f"- 纳入当前负责人及需求范围: {len(filtered_targets)}\n"
         f"- 跳过其他负责人: {filter_summary['skipped_assignee_count']}\n"
+        f"- 需求范围: {', '.join((filter_summary.get('requirement_filter') or {}).get('requirement_ids') or []) or '全部'}\n"
+        f"- 跳过其他需求: {(filter_summary.get('requirement_filter') or {}).get('skipped_requirement_count') or 0}\n"
+        f"- 跳过其他需求: {filter_summary['skipped_requirement_count']}\n"
         "- 说明: 仅使用命令显式列出的当前 issue.json，未扫描历史目录。\n"
     )
-    if args.report:
-        Path(args.report).write_text(report, encoding="utf-8")
+    write_report(config, args, report)
     print(report)
     return 0
+
+
+def requirement_identity_tokens(issue: dict[str, Any]) -> set[str]:
+    tokens: set[str] = set()
+    for requirement in issue.get("requirements") or []:
+        if isinstance(requirement, dict):
+            for key in ("id", "number", "url"):
+                token = identity_token(requirement.get(key))
+                if token:
+                    tokens.add(token)
+        else:
+            token = identity_token(requirement)
+            if token:
+                tokens.add(token)
+    return tokens
+
+
+def requested_requirement_tokens(config: dict[str, Any], args: argparse.Namespace) -> set[str]:
+    cli_values = getattr(args, "requirement_id", None) or []
+    if isinstance(cli_values, str):
+        cli_values = [cli_values]
+    configured = config_value(config, "query_policy.requirement_ids", []) or []
+    if isinstance(configured, str):
+        configured = [configured]
+    values = cli_values or configured
+    return {identity_token(value) for value in values if identity_token(value)}
+
+
+def filter_requirement_scope(
+    issues: list[dict[str, Any]], requirement_tokens: set[str]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not requirement_tokens:
+        return list(issues), {
+            "mode": "all-requirements",
+            "requirement_ids": [],
+            "input_count": len(issues),
+            "included_count": len(issues),
+            "skipped_requirement_count": 0,
+        }
+    included = [
+        issue for issue in issues if requirement_identity_tokens(issue) & requirement_tokens
+    ]
+    return included, {
+        "mode": "matched-requirements",
+        "requirement_ids": sorted(requirement_tokens),
+        "input_count": len(issues),
+        "included_count": len(included),
+        "skipped_requirement_count": len(issues) - len(included),
+    }
 
 
 def effort_rank(effort: str) -> int:
@@ -2084,12 +2426,14 @@ def fix_plan_fingerprint(issue: dict[str, Any], item: dict[str, Any], args: argp
         "risk": item.get("risk"),
         "report_quality_status": item.get("report_quality_status"),
         "report_quality_complete": item.get("report_quality_complete"),
+        "report_quality_hash_version": item.get("report_quality_hash_version"),
         "report_quality_questions": item.get("report_quality_questions") or item.get("questions") or [],
         "triage_policy_version": REPORT_QUALITY_POLICY_VERSION,
         "files": sorted(str(file) for file in (args.files or [])),
         "route": args.route or "",
         "notes": args.notes or "",
         "verification_mode": getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE),
+        "required_checks": sorted(getattr(args, "required_checks", None) or []),
         "completion_actions": sorted(getattr(args, "completion_action", None) or []),
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -2100,19 +2444,46 @@ def issue_summary_line(issue: dict[str, Any]) -> str:
     return f"{issue.get('number') or issue.get('id')} / {issue.get('id') or ''} - {issue.get('title') or ''}".strip()
 
 
-def configured_verification_steps(config: dict[str, Any]) -> list[str]:
+def required_verification_checks(
+    config: dict[str, Any], issue: dict[str, Any], files: list[str], route: str
+) -> list[str]:
+    verification = config.get("verification") or {}
+    suffixes = {Path(file).suffix.casefold() for file in files}
+    code_suffixes = {".js", ".jsx", ".ts", ".tsx", ".vue", ".py", ".java", ".go"}
+    style_suffixes = {".css", ".scss", ".sass", ".less", ".styl"}
+    checks: list[str] = []
+    if files and verification.get("format_check"):
+        checks.append("format_check")
+    if suffixes & code_suffixes and verification.get("lint"):
+        checks.append("lint")
+    if suffixes & style_suffixes and verification.get("stylelint"):
+        checks.append("stylelint")
+    if verification.get("test"):
+        checks.append("test")
+    if verification.get("build") and verification.get("run_build_by_default"):
+        checks.append("build")
+    browser = config.get("browser_verification") or {}
+    required_terms = [str(value).casefold() for value in browser.get("required_for") or []]
+    issue_text = combined_text(issue)
+    visible_signal = bool(route) or any(term and term in issue_text for term in required_terms)
+    if browser.get("enabled") and visible_signal:
+        checks.append("browser")
+    return list(dict.fromkeys(checks))
+
+
+def configured_verification_steps(
+    config: dict[str, Any], required_checks: list[str] | None = None
+) -> list[str]:
     steps: list[str] = []
     verification = config.get("verification") or {}
-    for key in ("format_write", "format_check", "lint", "stylelint", "test"):
+    allowed = set(required_checks or [])
+    for key in ("format_check", "lint", "stylelint", "test", "build"):
+        if required_checks is not None and key not in allowed:
+            continue
         value = verification.get(key)
         if value:
             steps.append(f"{key}: {value}")
-    build = verification.get("build")
-    if build and verification.get("run_build_by_default"):
-        steps.append(f"build: {build}")
-    elif build:
-        steps.append(f"build: {build}（按风险或用户要求执行）")
-    if config_value(config, "browser_verification.enabled", False):
+    if required_checks is not None and "browser" in allowed:
         steps.append(f"browser: {config_value(config, 'browser_verification.app_url', '<app-url>')}")
     return steps
 
@@ -2153,7 +2524,10 @@ def render_fix_plan(
 """
 
     files = "\n".join(f"- {file}" for file in args.files) if args.files else "- 待代码搜索后确认"
-    verification = "\n".join(f"- {step}" for step in configured_verification_steps(config)) or "- 按项目配置选择适用验证命令"
+    required_checks = getattr(args, "required_checks", None) or []
+    verification = "\n".join(
+        f"- {step}" for step in configured_verification_steps(config, required_checks)
+    ) or "- 当前配置没有可执行的 Standard 检查；补充配置或改用获批的 lightweight 模式"
     approval = "已按计划指纹批准" if approved else "未批准"
     route = args.route or "待确认"
     notes = args.notes or "无"
@@ -2214,14 +2588,20 @@ def render_fix_plan(
 
 
 def plan_fix(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
+    repo_root = repository_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     item = triage_issue_dir(config, target)
-    planned_files = normalize_planned_files(args.files or [])
+    planned_files = normalize_planned_files(args.files or [], repo_root)
     args.files = planned_files
     args.verification_mode = getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE)
+    args.required_checks = (
+        []
+        if args.verification_mode == LIGHTWEIGHT_VERIFICATION_MODE
+        else required_verification_checks(config, issue, planned_files, args.route or "")
+    )
     args.completion_action = normalize_completion_actions(config, args)
     candidate_fingerprint = fix_plan_fingerprint(issue, item, args)
     hard_blockers = hard_repair_blockers(item)
@@ -2271,6 +2651,8 @@ def plan_fix(args: argparse.Namespace) -> int:
             "planning_diagnostic": planning_diagnostic,
             "planned_files": recorded_files,
             "verification_mode": recorded_verification_mode,
+            "required_checks": [] if planning_diagnostic else args.required_checks,
+            "route": "" if planning_diagnostic else (args.route or ""),
             "completion_actions": recorded_completion_actions,
         },
     )
@@ -2282,6 +2664,7 @@ def plan_fix(args: argparse.Namespace) -> int:
         "plan_fingerprint": fingerprint,
         "planning_diagnostic": planning_diagnostic,
         "verification_mode": recorded_verification_mode,
+        "required_checks": [] if planning_diagnostic else args.required_checks,
         "completion_actions": recorded_completion_actions,
         "blockers": blockers,
     }
@@ -2328,8 +2711,9 @@ def render_implementation(issue: dict[str, Any], args: argparse.Namespace) -> st
 
 
 def record_implementation(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
+    repo_root = repository_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     require_artifact_done(target, "fix-plan", "record implementation")
@@ -2342,7 +2726,7 @@ def record_implementation(args: argparse.Namespace) -> int:
         raise SystemExit("record-implementation requires at least one non-empty --summary.")
     if not args.blocked and not files:
         raise SystemExit("record-implementation requires at least one changed file in --files.")
-    normalized_files = ensure_files_inside_cwd(files) if not args.blocked else files
+    normalized_files = ensure_files_inside_repo(files, repo_root) if not args.blocked else files
     try:
         planned_files = json.loads(plan_metadata.get("planned_files") or "[]")
     except json.JSONDecodeError as exc:
@@ -2375,6 +2759,11 @@ VERIFICATION_COMMAND_PATTERN = re.compile(
     r"^\s*(?P<command>.+?)\s*=>\s*(?P<result>passed|failed|blocked|skipped)(?:\s*:\s*(?P<notes>.*))?\s*$",
     re.IGNORECASE,
 )
+VERIFICATION_CHECK_PATTERN = re.compile(
+    r"^\s*(?P<check>[a-z][a-z0-9_-]*)\s*=\s*(?P<result>passed|failed|blocked|skipped)"
+    r"(?:\s*:\s*(?P<notes>.*))?\s*$",
+    re.IGNORECASE,
+)
 
 
 def parsed_verification_commands(args: argparse.Namespace) -> list[dict[str, str]]:
@@ -2394,8 +2783,53 @@ def parsed_verification_commands(args: argparse.Namespace) -> list[dict[str, str
     return parsed
 
 
+def parsed_verification_checks(args: argparse.Namespace) -> list[dict[str, str]]:
+    parsed: list[dict[str, str]] = []
+    for value in getattr(args, "check", None) or []:
+        match = VERIFICATION_CHECK_PATTERN.match(str(value))
+        if not match:
+            parsed.append(
+                {
+                    "check": str(value),
+                    "result": "invalid",
+                    "notes": "expected '<check>=<result>'",
+                }
+            )
+            continue
+        parsed.append(
+            {
+                "check": match.group("check").lower().replace("-", "_"),
+                "result": match.group("result").lower(),
+                "notes": (match.group("notes") or "").strip(),
+            }
+        )
+    return parsed
+
+
+def command_check_results(
+    config: dict[str, Any], commands: list[dict[str, str]]
+) -> dict[str, str]:
+    results: dict[str, str] = {}
+    verification = config.get("verification") or {}
+    for item in commands:
+        command = item.get("command") or ""
+        for check in ("format_check", "lint", "stylelint", "test", "build"):
+            template = str(verification.get(check) or "").strip()
+            if not template:
+                continue
+            stable_prefix = template.split("<", 1)[0].strip()
+            if command == template or (
+                stable_prefix
+                and (command == stable_prefix or command.startswith(f"{stable_prefix} "))
+            ):
+                results[check] = item.get("result") or "invalid"
+                break
+    return results
+
+
 def render_verification(issue: dict[str, Any], args: argparse.Namespace) -> str:
     commands = parsed_verification_commands(args)
+    checks = parsed_verification_checks(args)
     command_lines = (
         "\n".join(
             f"| {item['command']} | {item['result']} | {item['notes'] or '无'} |"
@@ -2404,6 +2838,13 @@ def render_verification(issue: dict[str, Any], args: argparse.Namespace) -> str:
         or "| 未运行 | pending | 无 |"
     )
     evidence = "\n".join(f"- {item}" for item in (args.evidence or [])) or "- 无"
+    check_lines = (
+        "\n".join(
+            f"| {item['check']} | {item['result']} | {item['notes'] or '无'} |"
+            for item in checks
+        )
+        or "| 未记录 | pending | 无 |"
+    )
     blocked = args.blocked or "无"
     mode = getattr(args, "mode", STANDARD_VERIFICATION_MODE)
     confidence = getattr(args, "confidence", "") or "未声明"
@@ -2419,6 +2860,15 @@ def render_verification(issue: dict[str, Any], args: argparse.Namespace) -> str:
 - 模式: {mode}
 - 修复把握: {confidence}
 - 轻量验证原因: {exemption_reason}
+- 验证来源: {getattr(args, 'verified_by', '') or '未声明'}
+- 验证时间: {getattr(args, 'verified_at', '') or '未记录'}
+- 来源说明: {getattr(args, 'verification_note', '') or '无'}
+
+## 必需检查结果
+
+| 检查 | 结果 | 说明 |
+| --- | --- | --- |
+{check_lines}
 
 ## 命令验证
 
@@ -2445,13 +2895,22 @@ def render_verification(issue: dict[str, Any], args: argparse.Namespace) -> str:
 """
 
 
-def verification_status(args: argparse.Namespace) -> str:
+def verification_status(
+    args: argparse.Namespace,
+    required_checks: list[str] | None = None,
+    check_results: dict[str, str] | None = None,
+) -> str:
     mode = getattr(args, "mode", STANDARD_VERIFICATION_MODE)
     if args.blocked or args.failed or args.browser in ("failed", "blocked"):
         return "blocked"
     commands = parsed_verification_commands(args)
     results = [item["result"] for item in commands]
-    if any(result in ("failed", "blocked", "invalid") for result in results):
+    explicit_checks = parsed_verification_checks(args)
+    explicit_results = [item["result"] for item in explicit_checks]
+    if any(
+        result in ("failed", "blocked", "invalid")
+        for result in [*results, *explicit_results]
+    ):
         return "blocked"
     if mode == LIGHTWEIGHT_VERIFICATION_MODE:
         if getattr(args, "confidence", "") != "high":
@@ -2459,6 +2918,18 @@ def verification_status(args: argparse.Namespace) -> str:
         if not str(getattr(args, "exemption_reason", "") or "").strip():
             return "pending"
         if not [item for item in (args.evidence or []) if str(item).strip()]:
+            return "pending"
+        return "done"
+    if required_checks is not None:
+        if not required_checks:
+            return "pending"
+        effective_results = dict(check_results or {})
+        effective_results.update(
+            {item["check"]: item["result"] for item in explicit_checks}
+        )
+        if "browser" in required_checks:
+            effective_results["browser"] = args.browser
+        if any(effective_results.get(check) != "passed" for check in required_checks):
             return "pending"
         return "done"
     if args.browser == "skipped":
@@ -2502,6 +2973,8 @@ def lightweight_verification_blockers(
         triage_metadata = frontmatter_metadata(artifact_path(target, "triage-report"))
         if triage_metadata.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION:
             blockers.append("Triage uses an older report-quality policy and must be regenerated.")
+        if triage_metadata.get("report_quality_hash_version") != REPORT_HASH_VERSION:
+            blockers.append("Triage uses an older report-quality hash version and must be migrated/regenerated.")
         return blockers
     triage_metadata = frontmatter_metadata(artifact_path(target, "triage-report"))
     if triage_metadata.get("repository_match") != "current-repo":
@@ -2522,12 +2995,14 @@ def lightweight_verification_blockers(
         blockers.append("Inbound evidence is incomplete; lightweight verification is not permitted.")
     if triage_metadata.get("report_quality_complete") != "true":
         blockers.append("Issue information is not sufficient for implementation and acceptance; lightweight verification is not permitted.")
+    if triage_metadata.get("report_quality_hash_version") != REPORT_HASH_VERSION:
+        blockers.append("Report-quality hash version is stale; lightweight verification is not permitted.")
     return blockers
 
 
 def record_verification(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     require_artifact_done(target, "implementation", "record verification")
@@ -2535,9 +3010,28 @@ def record_verification(args: argparse.Namespace) -> int:
     if policy_blockers:
         existing_blocker = str(args.blocked or "").strip()
         args.blocked = "; ".join([*policy_blockers, *([existing_blocker] if existing_blocker else [])])
-    status = verification_status(args)
+    plan_metadata = frontmatter_metadata(artifact_path(target, "fix-plan"))
+    try:
+        required_checks = json.loads(plan_metadata.get("required_checks") or "[]")
+    except json.JSONDecodeError as exc:
+        raise SystemExit("Fix-plan required_checks are malformed; regenerate the plan.") from exc
+    if not isinstance(required_checks, list):
+        raise SystemExit("Fix-plan required_checks must be a list; regenerate the plan.")
+    planned_mode = plan_metadata.get("verification_mode") or STANDARD_VERIFICATION_MODE
+    if planned_mode != getattr(args, "mode", STANDARD_VERIFICATION_MODE):
+        raise SystemExit("Verification mode does not match the approved fix plan.")
+    args.verified_at = utc_now_iso()
+    if not str(getattr(args, "verified_by", "") or "").strip():
+        raise SystemExit("record-verification requires --verified-by user|agent|ci.")
     commands = parsed_verification_commands(args)
-    passed_checks = sum(item["result"] == "passed" for item in commands) + int(args.browser == "passed")
+    inferred_results = command_check_results(config, commands)
+    status = verification_status(args, [str(item) for item in required_checks], inferred_results)
+    explicit_checks = parsed_verification_checks(args)
+    passed_checks = (
+        sum(item["result"] == "passed" for item in commands)
+        + sum(item["result"] == "passed" for item in explicit_checks)
+        + int(args.browser == "passed")
+    )
     evidence_count = passed_checks + len(args.evidence or [])
     write_markdown_artifact(
         artifact_path(target, "verification"),
@@ -2554,6 +3048,10 @@ def record_verification(args: argparse.Namespace) -> int:
                 and status == "done"
                 and not policy_blockers
             ),
+            "required_checks": required_checks,
+            "verified_by": args.verified_by,
+            "verified_at": args.verified_at,
+            "verification_note": getattr(args, "verification_note", ""),
         },
     )
     print(json.dumps({"issue": args.issue, "artifact": normalize_relative_path(artifact_path(target, "verification")), "status": status}, ensure_ascii=False, indent=2))
@@ -2598,8 +3096,8 @@ def render_closure(issue: dict[str, Any], verification_state: str, args: argpars
 
 
 def close_local(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
-    root = Path(config_value(config, "bugflow.root", args.root))
+    config = load_runtime_config(args)
+    root = artifact_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     verification_state = artifact_effective_status(target, "verification")
@@ -2630,9 +3128,10 @@ def close_local(args: argparse.Namespace) -> int:
     return 0 if status in ("done", "partial") else 2
 
 
-def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
+def run_git(args: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
+        cwd=cwd,
         check=False,
         capture_output=True,
         text=True,
@@ -2641,8 +3140,8 @@ def run_git(args: list[str]) -> subprocess.CompletedProcess[str]:
     )
 
 
-def ensure_files_inside_cwd(files: list[str]) -> list[str]:
-    cwd = Path.cwd().resolve()
+def ensure_files_inside_repo(files: list[str], repo_root: Path) -> list[str]:
+    cwd = repo_root.resolve()
     normalized: list[str] = []
     for file in files:
         raw = str(file)
@@ -2669,10 +3168,14 @@ def ensure_files_inside_cwd(files: list[str]) -> list[str]:
     return normalized
 
 
-def normalize_planned_files(files: list[str]) -> list[str]:
+def ensure_files_inside_cwd(files: list[str]) -> list[str]:
+    return ensure_files_inside_repo(files, Path.cwd())
+
+
+def normalize_planned_files(files: list[str], repo_root: Path | None = None) -> list[str]:
     """Normalize literal plan paths while allowing not-yet-created files."""
 
-    cwd = Path.cwd().resolve()
+    cwd = (repo_root or Path.cwd()).resolve()
     normalized: list[str] = []
     for file in files:
         raw = str(file).strip()
@@ -2706,17 +3209,18 @@ def commit_message_from_issue(config: dict[str, Any], issue: dict[str, Any], tem
 
 
 def commit_fix(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    config = load_runtime_config(args)
+    repo_root = repository_root(config, args)
     if not args.files:
         raise SystemExit("commit-fix requires --files so only fix-related files are staged.")
-    repository = run_git(["rev-parse", "--show-toplevel"])
+    repository = run_git(["rev-parse", "--show-toplevel"], cwd=repo_root)
     if repository.returncode != 0:
         raise SystemExit(repository.stderr.strip() or repository.stdout.strip() or "commit-fix must run inside a git repository")
-    if Path(repository.stdout.strip()).resolve() != Path.cwd().resolve():
-        raise SystemExit("commit-fix must run from the git repository root so literal file paths remain unambiguous.")
-    files = ensure_files_inside_cwd(args.files)
+    if Path(repository.stdout.strip()).resolve() != repo_root:
+        raise SystemExit("Configured repo root is not the Git repository root.")
+    files = ensure_files_inside_repo(args.files, repo_root)
 
-    root = Path(config_value(config, "bugflow.root", args.root))
+    root = artifact_root(config, args)
     target = issue_dir(root, args.issue)
     issue = load_issue(target)
     require_artifact_done(target, "fix-plan", "authorize commit")
@@ -2759,13 +3263,13 @@ def commit_fix(args: argparse.Namespace) -> int:
     elif int(verification_metadata.get("passed_checks") or 0) < 1 or evidence_count < 1:
         raise SystemExit("Verification has no structured passing evidence; record verification again.")
 
-    staged_before = run_git(["diff", "--cached", "--name-only", "-z"])
+    staged_before = run_git(["diff", "--cached", "--name-only", "-z"], cwd=repo_root)
     if staged_before.returncode != 0:
         raise SystemExit(staged_before.stderr.strip() or staged_before.stdout.strip() or "git staged-file check failed")
     if staged_before.stdout:
         raise SystemExit("Refusing commit-fix because the git index already contains pre-staged work.")
 
-    status = run_git(["--literal-pathspecs", "status", "--porcelain", "--", *files])
+    status = run_git(["--literal-pathspecs", "status", "--porcelain", "--", *files], cwd=repo_root)
     if status.returncode != 0:
         raise SystemExit(status.stderr.strip() or status.stdout.strip() or "git status failed")
     if not status.stdout.strip():
@@ -2788,21 +3292,21 @@ def commit_fix(args: argparse.Namespace) -> int:
         )
         return 0
 
-    add = run_git(["--literal-pathspecs", "add", "--", *files])
+    add = run_git(["--literal-pathspecs", "add", "--", *files], cwd=repo_root)
     if add.returncode != 0:
-        run_git(["reset", "--mixed", "--quiet", "HEAD"])
+        run_git(["reset", "--mixed", "--quiet", "HEAD"], cwd=repo_root)
         raise SystemExit(add.stderr.strip() or add.stdout.strip() or "git add failed")
-    staged_after = run_git(["diff", "--cached", "--name-only", "-z"])
+    staged_after = run_git(["diff", "--cached", "--name-only", "-z"], cwd=repo_root)
     staged_files = {item for item in staged_after.stdout.split("\x00") if item}
     if staged_after.returncode != 0 or staged_files != set(files):
-        run_git(["reset", "--mixed", "--quiet", "HEAD"])
+        run_git(["reset", "--mixed", "--quiet", "HEAD"], cwd=repo_root)
         detail = staged_after.stderr.strip() or f"staged paths differ: {sorted(staged_files)}"
         raise SystemExit(f"Refusing commit because exact-file staging could not be verified: {detail}")
-    commit = run_git(["commit", "-m", message])
+    commit = run_git(["commit", "-m", message], cwd=repo_root)
     if commit.returncode != 0:
-        run_git(["reset", "--mixed", "--quiet", "HEAD"])
+        run_git(["reset", "--mixed", "--quiet", "HEAD"], cwd=repo_root)
         raise SystemExit(commit.stderr.strip() or commit.stdout.strip() or "git commit failed")
-    rev = run_git(["rev-parse", "--short", "HEAD"])
+    rev = run_git(["rev-parse", "--short", "HEAD"], cwd=repo_root)
     commit_hash = rev.stdout.strip() if rev.returncode == 0 else ""
     print(
         json.dumps(
@@ -2830,6 +3334,14 @@ def top_ignore_pattern(path: Path) -> str:
     return f"{first}/" if first else normalized
 
 
+def path_relative_to_repo(path: Path, repo_root: Path) -> Path:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(repo_root.resolve())
+    except ValueError:
+        return resolved
+
+
 def gitignore_contains(path: Path, pattern: str) -> bool:
     if not path.exists():
         return False
@@ -2846,14 +3358,15 @@ def append_gitignore_pattern(path: Path, pattern: str) -> str:
         return "exists"
     existing = path.read_text(encoding="utf-8") if path.exists() else ""
     prefix = "" if not existing or existing.endswith("\n") else "\n"
-    path.write_text(f"{existing}{prefix}{pattern}\n", encoding="utf-8")
+    atomic_write_text(path, f"{existing}{prefix}{pattern}\n")
     return "added"
 
 
 def build_project_template(args: argparse.Namespace) -> str:
     template_name = "feishu-project-config.template.yaml" if args.platform == "feishu-project" else "project-config.template.yaml"
     text = read_asset(template_name)
-    project_name = args.project_name or Path.cwd().name
+    project_name = args.project_name or cli_repo_root(args).name
+    configured_artifact_root = args.artifact_root or args.root or ".bugflow/issues"
     replacements = {
         "name: example-project": f"name: {yaml_scalar(project_name)}",
         "project_key: example-key": f"project_key: {yaml_scalar(args.project_key or 'your-project-key')}",
@@ -2867,7 +3380,12 @@ def build_project_template(args: argparse.Namespace) -> str:
     text = re.sub(r"(?m)^(\s*platform:)\s*.*$", rf"\1 {yaml_scalar(args.platform)}", text, count=1)
     project_key = args.project_key or ("your-project-key" if args.platform == "feishu-project" else "")
     text = re.sub(r"(?m)^(\s*project_key:)\s*.*$", rf"\1 {yaml_scalar(project_key)}", text, count=1)
-    text = re.sub(r"(?m)^(\s*root:)\s*.*$", rf"\1 {yaml_scalar(normalize_relative_path(Path(args.root)))}", text, count=1)
+    text = re.sub(
+        r"(?m)^(\s*root:)\s*.*$",
+        rf"\1 {yaml_scalar(normalize_relative_path(Path(configured_artifact_root)))}",
+        text,
+        count=1,
+    )
     text = re.sub(r"(?m)^(\s*schema:)\s*.*$", rf"\1 {yaml_scalar(normalize_relative_path(Path(args.schema)))}", text, count=1)
     return text
 
@@ -2899,19 +3417,24 @@ def build_local_template(args: argparse.Namespace) -> str:
 
 def build_schema_template(args: argparse.Namespace) -> str:
     text = read_asset("bugflow-schema.template.yaml")
+    configured_artifact_root = args.artifact_root or args.root or ".bugflow/issues"
     return re.sub(
         r"(?m)^(\s*root:)\s*.*$",
-        rf"\1 {yaml_scalar(normalize_relative_path(Path(args.root)))}",
+        rf"\1 {yaml_scalar(normalize_relative_path(Path(configured_artifact_root)))}",
         text,
         count=1,
     )
 
 
 def init_project(args: argparse.Namespace) -> int:
-    config_path = Path(args.config)
-    local_config_path = Path(args.local_config)
-    schema_path = Path(args.schema)
-    root = Path(args.root)
+    repo_root = cli_repo_root(args)
+    config_path = argument_path(args, args.config)
+    local_config_path = argument_path(args, args.local_config)
+    schema_path = argument_path(args, args.schema)
+    configured_artifact_root = args.artifact_root or args.root or ".bugflow/issues"
+    root = Path(configured_artifact_root)
+    if not root.is_absolute():
+        root = repo_root / root
 
     results: list[dict[str, str]] = []
     results.append(
@@ -2934,11 +3457,13 @@ def init_project(args: argparse.Namespace) -> int:
     )
 
     if not args.skip_gitignore:
-        pattern = top_ignore_pattern(root)
-        action = append_gitignore_pattern(Path(".gitignore"), pattern)
+        relative_root = path_relative_to_repo(root, repo_root)
+        pattern = top_ignore_pattern(relative_root)
+        gitignore_path = repo_root / ".gitignore"
+        action = append_gitignore_pattern(gitignore_path, pattern)
         results.append({"path": ".gitignore", "action": f"{action} {pattern}"})
-        local_pattern = normalize_relative_path(local_config_path)
-        local_action = append_gitignore_pattern(Path(".gitignore"), local_pattern)
+        local_pattern = normalize_relative_path(path_relative_to_repo(local_config_path, repo_root))
+        local_action = append_gitignore_pattern(gitignore_path, local_pattern)
         results.append({"path": ".gitignore", "action": f"{local_action} {local_pattern}"})
 
     print(json.dumps({"initialized": results}, ensure_ascii=False, indent=2))
@@ -3006,7 +3531,18 @@ def format_order_by(order_by: str) -> str:
     raise SystemExit("Invalid query_policy.order_by: expected '<field> [asc|desc]'.")
 
 
-def build_feishu_mql(config: dict[str, Any], prefer_labels: bool = True) -> dict[str, Any]:
+def verified_remote_field_keys(config: dict[str, Any]) -> set[str]:
+    values = config_value(config, "field_verification.verified_keys", []) or []
+    if not isinstance(values, list):
+        raise SystemExit("field_verification.verified_keys must be a list of remotely verified field keys.")
+    return {str(value).strip() for value in values if str(value).strip()}
+
+
+def build_feishu_mql(
+    config: dict[str, Any], prefer_labels: bool = True, profile: str = "preview"
+) -> dict[str, Any]:
+    if profile not in {"preview", "fix-ready"}:
+        raise SystemExit("MQL profile must be preview or fix-ready.")
     mapping = field_mapping(config)
     project_key = validate_mql_identifier(
         config_value(config, "issue_source.project_key", "PROJECT_KEY"),
@@ -3016,21 +3552,32 @@ def build_feishu_mql(config: dict[str, Any], prefer_labels: bool = True) -> dict
         config_value(config, "issue_source.work_item_type", "issue"),
         "issue_source.work_item_type",
     )
+    core_names = ("id", "number", "title", "status", "assignee")
+    optional_names = (
+        ("priority", "updated_at", "requirements", "description")
+        if profile == "preview"
+        else (
+            "priority",
+            "reporter",
+            "created_at",
+            "updated_at",
+            "requirements",
+            "description",
+            "attachments",
+        )
+    )
+    verified_keys = verified_remote_field_keys(config)
+    allow_unverified_optional = bool(
+        config_value(config, "issue_source.allow_unverified_optional_fields", False)
+    )
+    selected_optional_names = [
+        name
+        for name in optional_names
+        if mapping.get(name)
+        and (allow_unverified_optional or mapping.get(name) in verified_keys)
+    ]
     raw_select_fields = unique_values(
-        [
-            mapping.get("id"),
-            mapping.get("number"),
-            mapping.get("title"),
-            mapping.get("status"),
-            mapping.get("priority"),
-            mapping.get("reporter"),
-            mapping.get("assignee"),
-            mapping.get("created_at"),
-            mapping.get("updated_at"),
-            mapping.get("requirements"),
-            mapping.get("description"),
-            mapping.get("attachments"),
-        ]
+        [*(mapping.get(name) for name in core_names), *(mapping.get(name) for name in selected_optional_names)]
     )
     select_fields = [validate_mql_identifier(field, "field_mapping value") for field in raw_select_fields]
     status_field = validate_mql_identifier(mapping.get("status") or "work_item_status", "status field")
@@ -3055,30 +3602,72 @@ def build_feishu_mql(config: dict[str, Any], prefer_labels: bool = True) -> dict
     status_condition = ", ".join(quote_sql_string(value) for value in status_values)
     if not status_condition:
         raise SystemExit("query_policy.status must contain at least one status value.")
+    raw_requirement_values = config_value(config, "query_policy.requirement_ids", []) or []
+    if isinstance(raw_requirement_values, str):
+        raw_requirement_values = [raw_requirement_values]
+    if not isinstance(raw_requirement_values, list):
+        raise SystemExit("query_policy.requirement_ids must be a list.")
+    requirement_values = unique_values([str(value) for value in raw_requirement_values])
+    requirement_field = mapping.get("requirements")
+    requirement_pushdown = bool(
+        config_value(config, "query_policy.requirement_mql_pushdown_verified", False)
+    )
+    requirement_clause = ""
+    if requirement_values and requirement_pushdown:
+        if not requirement_field or requirement_field not in verified_keys:
+            raise SystemExit(
+                "Requirement MQL pushdown requires a remotely verified field_mapping.requirements key."
+            )
+        requirement_identifier = validate_mql_identifier(requirement_field, "requirements field")
+        expressions = [
+            f"array_contains(`{requirement_identifier}`, {quote_sql_string(value)})"
+            for value in requirement_values
+        ]
+        requirement_clause = f"  AND ({' OR '.join(expressions)})\n"
     mql = (
         f"SELECT {select_clause}\n"
         f"FROM `{project_key}`.`{work_item_type}`\n"
         f"WHERE {assignee_condition}\n"
         f"  AND `{status_field}` IN ({status_condition})\n"
+        f"{requirement_clause}"
         f"ORDER BY {order_by}\n"
         f"LIMIT {limit}"
     )
-    exact_field_config_keys = unique_values([status_field, mapping.get("requirements"), mapping.get("attachments")])
+    optional_configured_fields = unique_values([mapping.get(name) for name in optional_names])
+    unverified_optional_fields = [
+        field for field in optional_configured_fields if field not in verified_keys
+    ]
+    exact_field_config_keys = unique_values(
+        [status_field, assignee_field, *optional_configured_fields]
+    )
     return {
+        "profile": profile,
         "project_key": project_key,
         "work_item_type": work_item_type,
         "select_fields": select_fields,
         "status_filter_values": status_values,
         "exact_field_config_keys": exact_field_config_keys,
+        "verified_field_keys": sorted(verified_keys),
+        "unverified_optional_fields": unverified_optional_fields,
+        "requirement_filter_values": requirement_values,
+        "requirement_filter_pushed_down": bool(requirement_clause),
+        "requirement_post_filter_required": bool(requirement_values and not requirement_clause),
         "mql": mql,
     }
 
 
 def feishu_mql(args: argparse.Namespace) -> int:
-    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    config = load_runtime_config(args)
     if config_value(config, "issue_source.platform") != "feishu-project":
         raise SystemExit("feishu-mql requires issue_source.platform: feishu-project")
-    result = build_feishu_mql(config, prefer_labels=not args.use_status_ids)
+    cli_requirements = getattr(args, "requirement_id", None) or []
+    if cli_requirements:
+        set_config_value(config, "query_policy.requirement_ids", cli_requirements)
+    result = build_feishu_mql(
+        config,
+        prefer_labels=not args.use_status_ids,
+        profile=getattr(args, "profile", "preview"),
+    )
     if args.json:
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
@@ -3091,8 +3680,8 @@ def feishu_mql(args: argparse.Namespace) -> int:
 
 
 def doctor(args: argparse.Namespace) -> int:
-    config_path = Path(args.config)
-    local_config_path = Path(args.local_config) if args.local_config else None
+    config_path = argument_path(args, args.config)
+    local_config_path = argument_path(args, args.local_config) if args.local_config else None
     config = load_config(config_path, local_config_path)
     checks: list[dict[str, str]] = []
 
@@ -3148,6 +3737,40 @@ def doctor(args: argparse.Namespace) -> int:
     else:
         add("ok", "field-mapping", "id/number/title/status are mapped")
 
+    verified_fields = verified_remote_field_keys(config)
+    verification_source = str(config_value(config, "field_verification.source", "") or "").strip()
+    verified_at = str(config_value(config, "field_verification.verified_at", "") or "").strip()
+    optional_fields = unique_values(
+        [
+            mapping.get("priority"),
+            mapping.get("reporter"),
+            mapping.get("created_at"),
+            mapping.get("updated_at"),
+            mapping.get("requirements"),
+            mapping.get("description"),
+            mapping.get("attachments"),
+        ]
+    )
+    unverified_optional = [field for field in optional_fields if field not in verified_fields]
+    if verified_fields and verification_source and verified_at:
+        add(
+            "ok",
+            "remote-field-verification",
+            f"{len(verified_fields)} keys verified at {verified_at} via {verification_source}",
+        )
+    else:
+        add(
+            "warn",
+            "remote-field-verification",
+            "local mappings are not proof of remote fields; record verified_keys/source/verified_at after exact field discovery",
+        )
+    if unverified_optional:
+        add(
+            "info",
+            "preview-optional-fields",
+            "excluded until remotely verified: " + ", ".join(unverified_optional),
+        )
+
     requirement_field = mapping.get("requirements")
     if not requirement_field:
         add("warn", "requirement-field", "missing field_mapping.requirements")
@@ -3185,7 +3808,7 @@ def doctor(args: argparse.Namespace) -> int:
     elif missing_status_codes:
         add("warn", "status-codes", f"missing ids: {', '.join(missing_status_codes)}")
 
-    root = Path(config_value(config, "bugflow.root", args.root))
+    root = artifact_root(config, args)
     if config_value(config, "bugflow.enabled", True):
         add("ok", "bugflow-root", normalize_relative_path(root))
     else:
@@ -3194,6 +3817,8 @@ def doctor(args: argparse.Namespace) -> int:
     schema = config_value(config, "bugflow.schema")
     if schema:
         schema_path = Path(schema)
+        if not schema_path.is_absolute():
+            schema_path = repository_root(config, args) / schema_path
         if schema_path.exists():
             add("ok", "bugflow-schema", normalize_relative_path(schema_path))
         else:
@@ -3205,8 +3830,13 @@ def doctor(args: argparse.Namespace) -> int:
     if commit_artifacts:
         add("info", "artifact-git-policy", "bugflow artifacts may be committed by project policy")
     else:
-        gitignore_path = Path(".gitignore")
-        pattern = top_ignore_pattern(root)
+        repo_root = repository_root(config, args)
+        gitignore_path = repo_root / ".gitignore"
+        relative_root = path_relative_to_repo(root, repo_root)
+        if relative_root.is_absolute():
+            add("warn", "artifact-git-policy", f"artifact root is outside repository: {root}")
+            relative_root = Path(root.name)
+        pattern = top_ignore_pattern(relative_root)
         if gitignore_contains(gitignore_path, pattern):
             add("ok", "artifact-git-policy", f"{pattern} is ignored")
         else:
@@ -3231,9 +3861,19 @@ def doctor(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--repo-root",
+        default="",
+        help="Repository root used for config, code paths, and Git operations. Defaults to the current directory.",
+    )
+    parser.add_argument(
+        "--artifact-root",
+        default="",
+        help="Per-issue artifact root. Relative paths resolve from --repo-root.",
+    )
     parser.add_argument("--config", default=".codex/bugflow/issue-triage.project.yaml")
     parser.add_argument("--local-config", default=".codex/bugflow/issue-triage.local.yaml")
-    parser.add_argument("--root", default=".bugflow/issues")
+    parser.add_argument("--root", default="", help="Deprecated alias for --artifact-root.")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init_parser = subparsers.add_parser("init-project", help="Create starter bugflow config files for this repository.")
@@ -3273,6 +3913,11 @@ def build_parser() -> argparse.ArgumentParser:
         aliases=["scan"],
         help="Quick assigned-issue triage without writing per-issue artifacts or requiring report-quality hashes.",
     )
+    fetch_parser.add_argument(
+        "--requirement-id",
+        action="append",
+        help="Import only issues linked to this requirement id/number/URL. Repeat as needed.",
+    )
     preview_parser.add_argument("--input", help="Raw or normalized issue JSON file. Reads stdin when omitted.")
     preview_parser.add_argument("--platform", default="feishu-project")
     preview_parser.add_argument(
@@ -3284,6 +3929,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-all-assignees",
         action="store_true",
         help="Explicitly preview issues assigned to other users as well.",
+    )
+    preview_parser.add_argument(
+        "--requirement-id",
+        action="append",
+        help="Preview only issues linked to this requirement id/number/URL. Repeat as needed.",
     )
     preview_parser.add_argument("--report", help="Optional markdown preview output path.")
     preview_parser.add_argument("--json", action="store_true", help="Print machine-readable preview results.")
@@ -3299,6 +3949,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quality_hash_parser.add_argument("--issue", required=True, help="Issue number/id.")
     quality_hash_parser.set_defaults(func=report_quality_hash_command)
+
+    migrate_parser = subparsers.add_parser(
+        "migrate-artifacts",
+        help="Apply safe metadata-only migrations; semantic changes still require re-triage.",
+    )
+    migrate_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    migrate_parser.set_defaults(func=migrate_artifacts)
 
     plan_parser = subparsers.add_parser("plan-fix", help="Create a controlled fix plan for one issue.")
     plan_parser.add_argument("--issue", required=True, help="Issue number/id.")
@@ -3359,6 +4016,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         help="Structured check '<command> => passed|failed|blocked|skipped'. Repeat as needed.",
     )
+    verify_parser.add_argument(
+        "--check",
+        action="append",
+        help="Named required check '<check>=passed|failed|blocked|skipped[: notes]'. Repeat as needed.",
+    )
+    verify_parser.add_argument(
+        "--verified-by",
+        choices=["user", "agent", "ci"],
+        required=True,
+        help="Who produced or directly confirmed this verification evidence.",
+    )
+    verify_parser.add_argument(
+        "--verification-note",
+        default="",
+        help="Short provenance note, such as CI run id or user-confirmation context.",
+    )
     verify_parser.add_argument("--browser", choices=["not-required", "passed", "failed", "blocked", "skipped"], default="not-required")
     verify_parser.add_argument("--browser-note", default="", help="Browser verification note.")
     verify_parser.add_argument("--evidence", action="append", help="Evidence note or screenshot path. Repeat as needed.")
@@ -3416,6 +4089,11 @@ def build_parser() -> argparse.ArgumentParser:
         "daily-existing",
         help="Triage explicitly listed current issue artifacts and render a report without re-importing JSON.",
     )
+    daily_parser.add_argument(
+        "--requirement-id",
+        action="append",
+        help="Include only issues linked to this requirement id/number/URL. Repeat as needed.",
+    )
     daily_existing_parser.add_argument(
         "--issue",
         action="append",
@@ -3433,9 +4111,25 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Explicitly include listed artifacts assigned to other users.",
     )
+    daily_existing_parser.add_argument(
+        "--requirement-id",
+        action="append",
+        help="Include only listed artifacts linked to this requirement id/number/URL. Repeat as needed.",
+    )
     daily_existing_parser.set_defaults(func=daily_existing)
 
     mql_parser = subparsers.add_parser("feishu-mql", help="Print a minimal Feishu Project MQL query from config.")
+    mql_parser.add_argument(
+        "--profile",
+        choices=["preview", "fix-ready"],
+        default="preview",
+        help="Select the minimal preview field set or remotely verified fix-ready fields.",
+    )
+    mql_parser.add_argument(
+        "--requirement-id",
+        action="append",
+        help="Declare an exact requirement scope. Repeat as needed.",
+    )
     mql_parser.add_argument("--json", action="store_true", help="Print machine-readable query metadata.")
     mql_parser.add_argument("--use-status-ids", action="store_true", help="Use configured status ids instead of labels in WHERE.")
     mql_parser.set_defaults(func=feishu_mql)

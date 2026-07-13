@@ -8,6 +8,7 @@ Use this reference before changing a remote issue status.
 - [Authorization Predicate](#authorization-predicate)
 - [Report-Quality Clarification Comments](#report-quality-clarification-comments)
 - [Config Fields](#config-fields)
+- [Error Recovery And Idempotency](#error-recovery-and-idempotency)
 - [Start Fix](#start-fix)
 - [Resolve For Acceptance](#resolve-for-acceptance)
 - [Complete Or Terminate](#complete-or-terminate)
@@ -64,6 +65,17 @@ Read:
 For comments, also read `remote_status_policy.update_comments_allowed`. This capability gate does not create exact-draft authorization. For any status change, require `remote_status_policy.update_status_allowed`. Treat missing values as `false`.
 
 Common Feishu status labels are `待修复`, `修复中`, `已解决，待验收`, `重新打开`, `已完成`, and `已终止`. Prefer stable ids from field config; labels alone are not enough for API updates.
+
+## Error Recovery And Idempotency
+
+If a remote transition returns an error, timeout, or ambiguous response:
+
+1. Re-read the issue's current status before deciding to retry.
+2. If it already equals the authorized target, record idempotent success and do not retry.
+3. If it still equals the verified source state, retry the exact same transition at most once.
+4. If it changed to any other state, stop immediately and report the concurrent/divergent state; do not force or chain another transition.
+
+Never infer failure only from the write response, and never loop retries. Include the re-read status and retry result in the transition summary.
 
 ## Start Fix
 

@@ -28,11 +28,13 @@ Recommended layout:
 | `.codex/bugflow/` | Local workflow config, schema, and user-local overrides. | Usually ignored with `.codex/`. |
 | `.bugflow/` | Generated run artifacts such as daily reports, issue intake, triage, fix plans, verification, and closure notes. | Add to the project `.gitignore` by default. |
 
+Use `--repo-root` for config/code/Git resolution and `--artifact-root` only for the per-issue storage root. Relative artifact/report paths resolve from the repository root, not an arbitrary process CWD. Configure aggregate reports under `bugflow.report_root` (default recommendation `.bugflow/reports`). A `preview --report` path must be Markdown inside that report root and cannot overwrite issue artifacts, `.codex`, `.git`, or code/config paths.
+
 Keep generated artifacts outside `.codex/bugflow/` so configuration does not mix with daily run output, and so the workflow can remain readable for non-Codex agents or scripts. Commit `.bugflow/` only when the team intentionally wants bug evidence and repair notes reviewed in git.
 
 ### Preview Is Not An Artifact Chain
 
-Use `bugflow_runner.py preview` for “只分诊/扫描/日报”. It standardizes and filters in memory, produces provisional ownership/risk/priority and suspected information gaps, and may write `.bugflow/daily-preview.md`. It does not create `.bugflow/issues/<issue>/`, `issue.json`, report-quality hashes, requirement matches, triage reports, plans, or downstream artifacts. It also does not inspect code, run build/browser checks, or mutate Git/remote state.
+Use `bugflow_runner.py preview` for “只分诊/扫描/日报”. It standardizes and filters in memory, produces provisional ownership/risk/priority and suspected information gaps, and may write `.bugflow/reports/daily-preview.md`. It does not create `.bugflow/issues/<issue>/`, `issue.json`, report-quality hashes, requirement matches, triage reports, plans, or downstream artifacts. It also does not inspect code, run build/browser checks, or mutate Git/remote state.
 
 Treat preview output as disposable discovery data. Do not infer strict `evidence_fetch` or `report_quality` status from it, and do not publish clarification drafts based on unverified preview data. Upgrade only the issue numbers the user selects to fix-ready.
 
@@ -66,6 +68,8 @@ Allowed statuses:
 - `blocked`: cannot proceed without a concrete input.
 
 The issue JSON counts as done only when it contains a safe issue key (`id` or `number`) and the normalized payload passes validation. File existence alone is not completion.
+
+Runner-owned JSON/Markdown output is written by same-directory temporary file plus atomic replace. New output includes `artifact_schema_version` and `runner_revision`; report-quality bindings also include `hash_version`. Do not hand-copy a `done` marker across versions.
 
 Artifact readiness:
 
@@ -110,8 +114,17 @@ When an upstream artifact changes materially, invalidate every descendant. The r
 - A changed triage result invalidates fix plan through closure.
 - A changed fix plan invalidates implementation through closure.
 - A changed implementation invalidates verification and closure.
+- A report-quality hash-version change invalidates strict triage and every downstream artifact even when the evidence input hash text is unchanged.
 
 Mark invalidated Markdown artifacts `pending` (or regenerate them). A stale `verification.md` must not satisfy commit or closure gates. Do not infer currentness from timestamps or file existence alone.
+
+For a metadata-only compatible upgrade, run:
+
+```powershell
+python <skill-dir>\scripts\bugflow_runner.py migrate-artifacts --issue BUG-28814
+```
+
+The migrator may add the current hash/schema metadata only when the stored assessment still matches the current evidence snapshot. It invalidates downstream work and requires re-triage. If the evidence hash differs, the existing hash version is unknown, or workflow semantics changed, migration fails closed and the issue must be reassessed.
 
 ## Safety Rules
 
@@ -140,16 +153,16 @@ Use `scripts/bugflow_runner.py` for setup and daily triage automation:
 ```powershell
 python <skill-dir>\scripts\bugflow_runner.py init-project --platform feishu-project --project-name my-project --project-key my-feishu-project-key
 python <skill-dir>\scripts\bugflow_runner.py doctor
-python <skill-dir>\scripts\bugflow_runner.py feishu-mql --json
-python <skill-dir>\scripts\bugflow_runner.py preview --input exported-issues.json --assignee <current-user-name-or-id> --report .bugflow/daily-preview.md
+python <skill-dir>\scripts\bugflow_runner.py feishu-mql --profile preview --json
+python <skill-dir>\scripts\bugflow_runner.py preview --input exported-issues.json --assignee <current-user-name-or-id> --report .bugflow/reports/daily-preview.md
 python <skill-dir>\scripts\bugflow_runner.py fetch-json --input selected-issue.json --assignee <current-user-name-or-id>
 python <skill-dir>\scripts\bugflow_runner.py report-quality-hash --issue BUG-28814
 python <skill-dir>\scripts\bugflow_runner.py triage --issue BUG-28814
-python <skill-dir>\scripts\bugflow_runner.py daily-existing --issue BUG-28814 --assignee <current-user-name-or-id> --report .bugflow/daily-report.md
+python <skill-dir>\scripts\bugflow_runner.py daily-existing --issue BUG-28814 --assignee <current-user-name-or-id> --report .bugflow/reports/daily-report.md
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action resolve-for-acceptance
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action resolve-for-acceptance --approved <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-28814 --summary "..." --files src/file.ts
-python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-28814 --command "pnpm exec eslint src/file.ts => passed"
+python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-28814 --verified-by agent --check "lint=passed: pnpm exec eslint src/file.ts"
 python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-28814 --files src/file.ts --authorized <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-28814 --summary "Fixed locally and verified"
 ```

@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 project:
   name: example-project
@@ -16,6 +16,7 @@ issue_source:
   project_key: ""
   work_item_type: issue
   default_status: OPEN
+  allow_unverified_optional_fields: false
 
 field_mapping:
   id: work_item_id
@@ -30,6 +31,13 @@ field_mapping:
   attachments: attachments
   created_at: created_at
   updated_at: updated_at
+
+field_verification:
+  # Export field mappings are local conventions; populate only when the remote
+  # schema was checked and the connector supports exact-key querying.
+  verified_keys: []
+  source: ""
+  verified_at: ""
 
 requirement_mapping:
   enabled: true
@@ -56,6 +64,7 @@ bugflow:
   # Generated artifacts live here. Add `.bugflow/` to the host repo's .gitignore
   # unless the team intentionally wants to review bugflow artifacts in git.
   root: .bugflow/issues
+  report_root: .bugflow/reports
   # Config/schema stays under `.codex/bugflow/` so it is separate from run output.
   schema: .codex/bugflow/schema.yaml
   commit_artifacts_by_default: false
@@ -64,6 +73,8 @@ query_policy:
   # Required before fetch-json/daily. Use the current user's tracker name or id.
   assigned_to: ""
   assignee_aliases: []
+  requirement_ids: []
+  requirement_mql_pushdown_verified: false
   status: OPEN
   limit: 20
   order_by: updated_at desc

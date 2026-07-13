@@ -37,7 +37,7 @@ Use the runner to keep fix-one work resumable:
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix --completion-action resolve-for-acceptance
 python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix --completion-action resolve-for-acceptance --approved <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-123 --summary "..." --files src/file.ts
-python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --command "pnpm exec eslint src/file.ts => passed" --browser passed --browser-note "Route checked"
+python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --verified-by agent --verification-note "local run" --check "lint=passed: pnpm exec eslint src/file.ts" --browser passed --browser-note "Route checked"
 python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-123 --files src/file.ts --authorized <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-123 --summary "Fixed locally and verified"
 ```
@@ -81,7 +81,9 @@ Record every applicable check with:
 
 ### Standard mode
 
-Require at least one applicable `passed` check. An empty command list, a browser default such as `not-required`, or prose without a result must not produce `status: done`. If a command cannot run, mark it `blocked` and record the reason; do not silently omit it.
+`plan-fix` derives and stores exact `required_checks` from the planned files, configured test/build policy, route, and visible issue signals. Every required check must have a matching structured `passed` result. Use `--check "lint=passed: ..."`, `--check "test=passed: ..."`, and so on; exact configured `--command "... => passed"` values may also be recognized. An unrelated successful command, empty command list, browser default such as `not-required`, or prose without a result must not produce `status: done`. If a required check cannot run, mark it `blocked` and record the reason; do not silently omit it.
+
+Every successful or attempted record must declare `--verified-by user|agent|ci`. The runner records UTC `verified_at` automatically; use `--verification-note` for a user-confirmation context, CI run id, or agent-run summary. This is provenance, not proof by itself.
 
 ### Lightweight mode
 
@@ -96,7 +98,7 @@ Use lightweight verification only when all conditions hold:
 Example:
 
 ```powershell
-python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --mode lightweight --confidence high --exemption-reason "No deterministic external callback fixture" --evidence "Reviewed the exact diff, null/error branches, and callback contract" --browser skipped --browser-note "Requires acceptance in the real callback environment" --residual-risk "Acceptance test still recommended"
+python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --mode lightweight --confidence high --verified-by agent --verification-note "scoped diff and contract review" --exemption-reason "No deterministic external callback fixture" --evidence "Reviewed the exact diff, null/error branches, and callback contract" --browser skipped --browser-note "Requires acceptance in the real callback environment" --residual-risk "Acceptance test still recommended"
 ```
 
 Never use lightweight mode for high-risk, cross-owner, backend-owned, unclear, destructive, auth/payment/data-loss, or failed fixes.
@@ -117,6 +119,7 @@ Rules:
 
 - Before staging, inspect the Git index. If any path is already staged, abort and report it; do not commit or unstage the user's work.
 - Stage only literal fix-related files passed with `--files`.
+- Resolve all file and Git operations from the explicit/configured repository root, never from the process CWD; artifact storage may be elsewhere.
 - Require the commit file set to match the files recorded by the approved implementation exactly.
 - Reject `.`, directories, glob patterns, deleted/renamed ambiguity not represented by an exact path, and paths outside the repository.
 - Do not stage `.bugflow/` unless the project explicitly commits artifacts.

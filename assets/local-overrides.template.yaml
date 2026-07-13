@@ -1,4 +1,4 @@
-schema_version: 1
+schema_version: 2
 
 # Optional local-only overrides. Keep this file out of git.
 # Local overrides are deny-only safety controls: `false` may tighten a project

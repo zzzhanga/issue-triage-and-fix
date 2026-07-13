@@ -50,7 +50,9 @@ Every non-`unknown` assessment must be bound to the exact normalized evidence sn
 python <skill-dir>\scripts\bugflow_runner.py report-quality-hash --issue BUG-123
 ```
 
-Copy the returned value to `report_quality.input_hash`, then record the semantic assessment and `assessed_at`. The runner requires at least one confirmed fact and evidence reference before accepting `sufficient`. If the description, requirements, comments, activities, inspected attachments, or evidence findings change, the old hash becomes stale and the assessment returns to `unknown`; re-read the changed evidence, recompute the hash, and assess again. Never reuse an old verdict against a new evidence snapshot.
+Copy both returned values to `report_quality.hash_version` and `report_quality.input_hash`, then record the semantic assessment and `assessed_at`. The runner requires the current hash version plus at least one confirmed fact and evidence reference before accepting `sufficient`. If the description, requirements, comments, activities, inspected attachments, evidence findings, or hash algorithm version changes, the old assessment returns to `unknown`; re-read changed evidence, recompute the hash, and assess again. Never reuse an old verdict against a new evidence snapshot or hash version.
+
+For an older artifact with no `hash_version`, `migrate-artifacts --issue <id>` may add current metadata only when its stored hash already matches the current evidence under the compatible algorithm. It still invalidates downstream triage. A mismatched hash or unsupported version requires a new semantic assessment; migration must not manufacture one.
 
 ## Canonical Shape
 
@@ -68,6 +70,7 @@ Store the assessment at top level in normalized `issue.json`:
   "report_quality": {
     "status": "needs-clarification",
     "assessed_at": "2026-07-13T10:10:00+08:00",
+    "hash_version": "1",
     "input_hash": "<hash from report-quality-hash>",
     "facts": ["The inspected video shows a blank first frame at 00:08."],
     "evidence_refs": ["attachment repro.mp4@00:08"],
@@ -108,7 +111,7 @@ Publishing the clarification to Feishu is a separate external write. Require exp
 After several selected issues have completed this strict assessment, render their strict summary with explicit numbers:
 
 ```powershell
-python <skill-dir>\scripts\bugflow_runner.py daily-existing --issue BUG-123 --issue BUG-456 --assignee <current-user-name-or-id> --report .bugflow/daily-report.md
+python <skill-dir>\scripts\bugflow_runner.py daily-existing --issue BUG-123 --issue BUG-456 --assignee <current-user-name-or-id> --report .bugflow/reports/daily-report.md
 ```
 
 Do not run `daily --input` again for those issues: re-importing the original candidate payload can replace enriched comments, attachment summaries, and bound `report_quality` values with the earlier sparse snapshot.

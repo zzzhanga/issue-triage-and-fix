@@ -52,13 +52,16 @@ Default to fetching:
 Apply the assignee rule to imported JSON as well as native queries:
 
 - Feishu native MQL uses `current_login_user()` before export.
+- Treat that native predicate as necessary but not sufficient: after normalization every returned item must have a readable assignee, and a no-alias batch must share one common current-user identity. Reject a mixed batch instead of trusting the wrapper query.
 - For exported JSON, configure `query_policy.assigned_to` and optional `assignee_aliases`, or pass one or more `--assignee` values.
 - `fetch-json` and `daily` skip issues whose normalized `assignee` does not match the current-user values and report the skipped count.
 - If the current assignee cannot be resolved, stop instead of importing everyone. Use `--include-all-assignees` only when the user explicitly asks to inspect other owners' issues.
 
 If any configured field fails, fetch the tracker field schema before retrying. Use field keys or ids, not display labels, whenever the platform supports stable identifiers.
 
-For Feishu Project, run `bugflow_runner.py feishu-mql --json` after `doctor` passes. Use the generated MQL for routine fetches, and use the returned `exact_field_config_keys` only when a field error requires schema confirmation.
+When the task is limited to one or more demands, pass `--requirement-id` or configure `query_policy.requirement_ids`. Match normalized requirement id, number, or URL after the assignee filter. Do not push this filter into MQL until `field_mapping.requirements` is remotely verified and `requirement_mql_pushdown_verified` is true.
+
+For Feishu Project, run `bugflow_runner.py feishu-mql --profile preview --json` for a scan and `--profile fix-ready` only for a selected issue. Use only remotely verified optional SELECT fields, and use the returned `exact_field_config_keys` when schema confirmation is needed. The runner accepts both flat records and Feishu's grouped `data -> group -> moql_field_list[]` response.
 
 ## Standard Issue Shape
 
@@ -105,6 +108,7 @@ Normalize each issue to:
   "report_quality": {
     "status": "sufficient",
     "assessed_at": "2026-07-07T10:10:00+08:00",
+    "hash_version": "1",
     "input_hash": "<hash from report-quality-hash>",
     "facts": ["The inspected recording and comment define trigger, actual, and expected results."],
     "evidence_refs": ["attachment repro.mp4@00:08", "comment comment-7"],

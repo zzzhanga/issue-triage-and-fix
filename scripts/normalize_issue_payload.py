@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -82,6 +84,23 @@ SENSITIVE_CJK_ASSIGNMENT_PATTERN = re.compile(
 )
 EVIDENCE_SOURCE_STATES = {"complete", "partial", "not-applicable", "skipped", "error", "unknown"}
 REPORT_QUALITY_STATES = {"sufficient", "needs-clarification", "conflicting", "unknown"}
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 SENSITIVE_KEY_PARTS = {
     "authorization",
     "bearer",
@@ -430,6 +449,7 @@ def normalize_report_quality(value: Any) -> dict[str, Any]:
     result: dict[str, Any] = {
         "status": "unknown",
         "assessed_at": None,
+        "hash_version": "",
         "input_hash": "",
         "facts": [],
         "evidence_refs": [],
@@ -474,6 +494,7 @@ def normalize_report_quality(value: Any) -> dict[str, Any]:
     result["input_hash"] = str(
         result.get("input_hash") or result.get("assessment_input_hash") or ""
     ).strip()
+    result["hash_version"] = str(result.get("hash_version") or "").strip()
     return result
 
 
@@ -560,6 +581,9 @@ def main() -> int:
     )
     args = parser.parse_args()
 
+    if args.input and args.output and Path(args.input).resolve() == Path(args.output).resolve():
+        raise SystemExit("Refusing to use the input JSON file as its own output path.")
+
     payload = load_json(args.input)
 
     mapping: dict[str, str] = {}
@@ -585,7 +609,7 @@ def main() -> int:
     output = json.dumps(normalized, ensure_ascii=False, indent=2)
 
     if args.output:
-        Path(args.output).write_text(output + "\n", encoding="utf-8")
+        atomic_write_text(Path(args.output), output + "\n")
     else:
         print(output)
 
