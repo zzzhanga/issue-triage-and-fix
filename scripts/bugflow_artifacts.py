@@ -138,6 +138,15 @@ ARTIFACTS = [
     },
 ]
 
+REPORT_QUALITY_POLICY_VERSION = "2"
+REPORT_QUALITY_GATED_ARTIFACTS = {
+    "triage-report",
+    "fix-plan",
+    "implementation",
+    "verification",
+    "closure",
+}
+
 
 WINDOWS_RESERVED_NAMES = {
     "CON",
@@ -303,6 +312,14 @@ def effective_artifact_status(issue_root: Path, artifact_id: str) -> str:
     expected = dependency_fingerprint(issue_root, artifact_id)
     if metadata.get("dependency_hash") != expected:
         return "stale"
+    if artifact_id in REPORT_QUALITY_GATED_ARTIFACTS:
+        triage = frontmatter_metadata(issue_root / artifact_definition("triage-report")["file"])
+        if (
+            triage.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION
+            or triage.get("report_quality_complete") != "true"
+            or triage.get("evidence_complete") != "true"
+        ):
+            return "stale"
     return "done"
 
 
@@ -329,6 +346,14 @@ def init_artifacts(args: argparse.Namespace) -> int:
         "number": args.issue,
         "title": args.title or "",
         "status": args.status or "",
+        "description": "",
+        "reproduction_steps": "",
+        "actual_result": "",
+        "expected_result": "",
+        "acceptance_criteria": "",
+        "environment": "",
+        "test_data": "",
+        "implementation_suggestion": "",
         "requirements": [],
         "attachments": [],
         "comments": [],
@@ -342,6 +367,18 @@ def init_artifacts(args: argparse.Namespace) -> int:
             "fetched_at": None,
             "findings": [],
             "missing": ["Evidence intake has not been completed."],
+        },
+        "report_quality": {
+            "status": "unknown",
+            "assessed_at": None,
+            "input_hash": "",
+            "facts": [],
+            "evidence_refs": [],
+            "missing_fields": [],
+            "conflicts": [],
+            "questions": [],
+            "feedback_targets": [],
+            "feedback_draft": "",
         },
         "raw": {},
     }

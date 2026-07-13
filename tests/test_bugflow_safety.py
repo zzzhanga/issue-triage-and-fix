@@ -49,6 +49,45 @@ def complete_evidence(*findings: str) -> dict[str, object]:
     }
 
 
+def sufficient_report_quality(
+    *facts: str, evidence_refs: list[str] | None = None
+) -> dict[str, object]:
+    return {
+        "status": "sufficient",
+        "assessed_at": "2026-07-13T10:05:00+08:00",
+        "facts": list(facts)
+        or ["复现条件、实际结果、期望结果和验收口径已由完整工单证据明确。"],
+        "evidence_refs": evidence_refs or ["description"],
+        "missing_fields": [],
+        "conflicts": [],
+        "questions": [],
+        "feedback_targets": [],
+        "feedback_draft": "",
+    }
+
+
+def bind_report_quality(issue: dict[str, object]) -> dict[str, object]:
+    quality = issue.get("report_quality")
+    if not isinstance(quality, dict):
+        raise AssertionError("report_quality must be a dictionary before binding")
+    quality["input_hash"] = runner.report_quality_input_hash(issue)
+    return issue
+
+
+def current_triage_metadata(
+    issue: dict[str, object], **overrides: object
+) -> dict[str, object]:
+    quality = runner.issue_report_quality_state(issue)
+    metadata: dict[str, object] = {
+        "evidence_complete": runner.issue_evidence_state(issue)["complete"],
+        "report_quality_complete": quality["complete"],
+        "report_quality_input_hash": quality["expected_input_hash"],
+        "triage_policy_version": runner.REPORT_QUALITY_POLICY_VERSION,
+    }
+    metadata.update(overrides)
+    return metadata
+
+
 class ConfigSafetyTests(unittest.TestCase):
     def test_local_override_cannot_turn_project_false_permissions_true(self) -> None:
         project = {
@@ -228,7 +267,9 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "title": "订单保存后数据丢失",
             "description": "用户点击保存后，刚填写的业务数据消失。",
             "evidence_fetch": complete_evidence(),
+            "report_quality": sufficient_report_quality(),
         }
+        bind_report_quality(issue)
 
         result = runner.classify_issue(self.config(), issue, self.MATCH)
 
@@ -242,7 +283,9 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "title": "列表页按钮颜色与设计稿不一致",
             "description": "只调整独立页面按钮的 CSS 颜色值。",
             "evidence_fetch": complete_evidence(),
+            "report_quality": sufficient_report_quality(),
         }
+        bind_report_quality(issue)
 
         allowed = runner.classify_issue(self.config(), issue, self.MATCH)
         auto_fix_disabled = runner.classify_issue(
@@ -256,6 +299,231 @@ class TriageAndRepairGateTests(unittest.TestCase):
         self.assertEqual(auto_fix_disabled["readiness"], "manual-review-first")
         self.assertEqual(frontend_auto_fix_disabled["readiness"], "manual-review-first")
 
+    def test_complete_evidence_without_report_quality_assessment_cannot_auto_fix(self) -> None:
+        issue = {
+            "id": "2-unknown",
+            "number": "BUG-2-UNKNOWN",
+            "title": "详情页按钮颜色不一致",
+            "description": "按钮颜色需要调整。",
+            "evidence_fetch": complete_evidence(),
+        }
+
+        result = runner.classify_issue(self.config(), issue, self.MATCH)
+        status, blockers = runner.repair_gate(
+            self.config(), result | self.MATCH, approved=True
+        )
+
+        self.assertEqual(result["report_quality_status"], "unknown")
+        self.assertIs(result["report_quality_complete"], False)
+        self.assertEqual(result["readiness"], "ask-for-confirmation")
+        self.assertNotEqual(result["readiness"], "auto-fix-candidate")
+        self.assertEqual(status, "blocked")
+        self.assertRegex(" ".join(blockers).lower(), r"report-quality|acceptance|expected")
+
+    def test_missing_expected_result_produces_exact_question_and_feedback_draft(self) -> None:
+        exact_question = "期望按哪个字段、什么方向排序，并应用于完整数据集还是当前页？"
+        issue = {
+            "id": "2-missing",
+            "number": "BUG-2-MISSING",
+            "title": "列表排序不对",
+            "description": "当前排序不对，请修改。",
+            "evidence_fetch": complete_evidence(),
+            "report_quality": {
+                "status": "needs-clarification",
+                "assessed_at": "2026-07-13T10:05:00+08:00",
+                "facts": ["当前列表顺序被报告为不正确。"],
+                "evidence_refs": ["description"],
+                "missing_fields": [
+                    {
+                        "field": "expected_result",
+                        "reason": "未说明排序字段、方向和作用范围。",
+                        "question": exact_question,
+                        "target": "测试/产品",
+                    }
+                ],
+            },
+        }
+        bind_report_quality(issue)
+
+        quality = runner.issue_report_quality_state(issue)
+        result = runner.classify_issue(self.config(), issue, self.MATCH)
+        status, blockers = runner.repair_gate(
+            self.config(), result | self.MATCH, approved=True
+        )
+
+        self.assertEqual(quality["status"], "needs-clarification")
+        self.assertEqual(quality["questions"], [exact_question])
+        self.assertIn(exact_question, quality["feedback_draft"])
+        self.assertEqual(result["report_quality_questions"], [exact_question])
+        self.assertIn(exact_question, result["missing_information"])
+        self.assertIn(exact_question, result["feedback_draft"])
+        self.assertEqual(result["feedback_publish_status"], "draft-only")
+        self.assertEqual(status, "blocked")
+        self.assertRegex(" ".join(blockers).lower(), r"report-quality|acceptance|expected")
+
+    def test_comments_and_video_can_make_empty_structured_fields_sufficient(self) -> None:
+        issue = {
+            "id": "2-media",
+            "number": "BUG-2-MEDIA",
+            "title": "详情页按钮被底部栏遮挡",
+            "description": "请查看评论和录屏。",
+            "reproduction_steps": "",
+            "actual_result": "",
+            "expected_result": "",
+            "acceptance_criteria": "",
+            "comments": [
+                {
+                    "id": "comment-7",
+                    "content_text": (
+                        "375px 宽度打开详情页并滚动到底部，按钮被底栏遮挡；"
+                        "期望按钮完整可见且可点击。"
+                    ),
+                    "attachments": [],
+                }
+            ],
+            "attachments": [
+                {
+                    "id": "video-1",
+                    "name": "repro.mp4",
+                    "decision_relevant": True,
+                    "inspection_state": "inspected",
+                    "summary": "00:08 显示按钮被底部栏遮挡，00:11 点击无响应。",
+                }
+            ],
+            "evidence_fetch": complete_evidence(
+                "评论与录屏共同明确复现步骤、实际结果和验收口径。"
+            ),
+            "report_quality": sufficient_report_quality(
+                "375px 详情页底部按钮必须完整可见且可点击。",
+                evidence_refs=["comment comment-7", "attachment repro.mp4@00:08-00:11"],
+            ),
+        }
+        bind_report_quality(issue)
+
+        result = runner.classify_issue(self.config(), issue, self.MATCH)
+
+        self.assertEqual(result["report_quality_status"], "sufficient")
+        self.assertIs(result["report_quality_complete"], True)
+        self.assertEqual(result["ownership"], "frontend-owned")
+        self.assertEqual(result["readiness"], "auto-fix-candidate")
+
+    def test_conflicting_acceptance_sources_block_repair(self) -> None:
+        exact_question = "标题要求降序，最新评论要求升序；哪一个是最终验收口径？"
+        issue = {
+            "id": "2-conflict",
+            "number": "BUG-2-CONFLICT",
+            "title": "列表按创建时间降序",
+            "description": "请调整列表顺序。",
+            "comments": [
+                {
+                    "id": "comment-9",
+                    "content_text": "最终应该按创建时间升序。",
+                    "attachments": [],
+                }
+            ],
+            "evidence_fetch": complete_evidence(),
+            "report_quality": {
+                "status": "conflicting",
+                "assessed_at": "2026-07-13T10:05:00+08:00",
+                "facts": ["标题与最新评论给出了不同的排序方向。"],
+                "evidence_refs": ["title", "comment comment-9"],
+                "conflicts": [
+                    {
+                        "topic": "创建时间排序方向",
+                        "sources": ["title", "comment comment-9"],
+                        "question": exact_question,
+                        "target": "产品",
+                    }
+                ],
+            },
+        }
+        bind_report_quality(issue)
+
+        result = runner.classify_issue(self.config(), issue, self.MATCH)
+        status, blockers = runner.repair_gate(
+            self.config(), result | self.MATCH, approved=True
+        )
+
+        self.assertEqual(result["report_quality_status"], "conflicting")
+        self.assertIs(result["report_quality_complete"], False)
+        self.assertEqual(result["report_quality_questions"], [exact_question])
+        self.assertEqual(result["readiness"], "ask-for-confirmation")
+        self.assertEqual(status, "blocked")
+        self.assertRegex(" ".join(blockers).lower(), r"report-quality|acceptance|expected")
+
+    def test_non_empty_matching_report_quality_hash_is_accepted_without_crashing(self) -> None:
+        issue = {
+            "id": "2-hash",
+            "number": "BUG-2-HASH",
+            "title": "详情页按钮颜色不一致",
+            "description": "按钮应使用绿色主题色。",
+            "evidence_fetch": complete_evidence(),
+            "report_quality": sufficient_report_quality(
+                "按钮应使用绿色主题色。", evidence_refs=["description"]
+            ),
+        }
+        bind_report_quality(issue)
+
+        state = runner.issue_report_quality_state(issue)
+
+        self.assertEqual(len(issue["report_quality"]["input_hash"]), 64)
+        self.assertEqual(state["status"], "sufficient")
+        self.assertIs(state["assessment_current"], True)
+        self.assertIs(state["complete"], True)
+
+    def test_new_comment_makes_old_assessment_stale_and_hides_old_facts(self) -> None:
+        old_fact = "列表接口必须由后端按数据库字段倒序返回。"
+        issue = {
+            "id": "2-stale",
+            "number": "BUG-2-STALE",
+            "title": "详情页按钮颜色不一致",
+            "description": "只调整当前页面按钮的 CSS 颜色。",
+            "comments": [],
+            "evidence_fetch": complete_evidence(),
+            "report_quality": sufficient_report_quality(
+                old_fact, evidence_refs=["description"]
+            ),
+        }
+        bind_report_quality(issue)
+        old_hash = issue["report_quality"]["input_hash"]
+        issue["comments"].append(
+            {
+                "id": "comment-new",
+                "content_text": "补充：请以最新版绿色视觉稿为准。",
+                "attachments": [],
+            }
+        )
+
+        quality = runner.issue_report_quality_state(issue)
+        triage = runner.classify_issue(self.config(), issue, self.MATCH)
+        report = runner.render_daily_markdown(
+            [
+                {
+                    "issue": issue["number"],
+                    "id": issue["id"],
+                    "title": issue["title"],
+                    "priority": "P2",
+                    "status": "待修复",
+                    "date": "2026-07-13",
+                    "reporter": "测试",
+                    "assignee": "当前用户",
+                    "repository_match": "current-repo",
+                    "confirmation_required": False,
+                    **triage,
+                    "questions": triage["report_quality_questions"],
+                }
+            ]
+        )
+
+        self.assertNotEqual(old_hash, quality["expected_input_hash"])
+        self.assertEqual(quality["status"], "unknown")
+        self.assertIs(quality["assessment_current"], False)
+        self.assertEqual(quality["facts"], [])
+        self.assertEqual(triage["ownership"], "frontend-owned")
+        self.assertEqual(triage["report_quality_facts"], [])
+        self.assertNotIn(old_fact, report)
+        self.assertIn("未评估", report)
+
     def test_approved_does_not_bypass_unresolved_confirmation(self) -> None:
         item = {
             "repository_match": "current-repo",
@@ -263,6 +531,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "confirmation_required": True,
             "readiness": "ask-for-confirmation",
             "effort": "easy",
+            "report_quality_complete": True,
         }
 
         status, blockers = runner.repair_gate(self.config(), item, approved=True)
@@ -278,6 +547,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "confirmation_required": False,
             "readiness": "manual-review-first",
             "effort": "easy",
+            "report_quality_complete": True,
         }
 
         status, blockers = runner.repair_gate(self.config(), item, approved=True)
@@ -299,6 +569,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "effort": "easy",
             "risk": "low",
             "evidence_complete": True,
+            "report_quality_complete": True,
         }
 
         status, blockers = runner.repair_gate(config, item, approved=True)
@@ -312,14 +583,24 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "number": "BUG-3",
             "title": "前端把列表接口数据从正序改为倒序",
             "description": "接口返回顺序不符合预期，要求页面收到数据后 reverse。",
+            "actual_result": "接口按 created_at asc 返回。",
+            "expected_result": "接口按 created_at desc、id desc 返回完整数据集。",
+            "acceptance_criteria": "跨分页查询仍保持 created_at desc、id desc。",
+            "implementation_suggestion": "前端拿到当前页后调用 reverse。",
             "evidence_fetch": complete_evidence(),
+            "report_quality": sufficient_report_quality(
+                "期望接口按 created_at desc、id desc 返回完整数据集。"
+            ),
         }
+        bind_report_quality(issue)
 
         result = runner.classify_issue(self.config(), issue, self.MATCH)
         status, blockers = runner.repair_gate(self.config(), result | self.MATCH, approved=True)
 
         self.assertEqual(result["ownership"], "backend-owned")
         self.assertEqual(result["readiness"], "redirect-to-owner")
+        self.assertEqual(result["report_quality_status"], "sufficient")
+        self.assertIs(result["report_quality_complete"], True)
         self.assertIn("API 契约", result["reason"])
         self.assertEqual(status, "blocked")
         self.assertTrue(blockers)
@@ -347,7 +628,9 @@ class TriageAndRepairGateTests(unittest.TestCase):
                 "findings": [],
                 "missing": ["Comment access denied."],
             },
+            "report_quality": sufficient_report_quality(),
         }
+        bind_report_quality(issue)
 
         result = runner.classify_issue(self.config(), issue, self.MATCH)
 
@@ -370,7 +653,11 @@ class TriageAndRepairGateTests(unittest.TestCase):
                 }
             ],
             "evidence_fetch": complete_evidence("Latest comment clarifies that the API response order is the disputed behavior."),
+            "report_quality": sufficient_report_quality(
+                "最新评论明确了期望排序。", evidence_refs=["comment comment-1"]
+            ),
         }
+        bind_report_quality(issue)
 
         result = runner.classify_issue(self.config(), issue, self.MATCH)
 
@@ -394,7 +681,12 @@ class TriageAndRepairGateTests(unittest.TestCase):
                 }
             ],
             "evidence_fetch": complete_evidence("The inspected recording confirms a local layout defect."),
+            "report_quality": sufficient_report_quality(
+                "录屏明确展示按钮被底部栏遮挡。",
+                evidence_refs=["attachment repro.mp4@00:08"],
+            ),
         }
+        bind_report_quality(issue)
 
         result = runner.classify_issue(self.config(), issue, self.MATCH)
 
@@ -410,6 +702,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "confirmation_required": False,
             "readiness": "manual-review-first",
             "effort": "easy",
+            "report_quality_complete": True,
             "risk": "low",
             "evidence_complete": False,
         }
@@ -438,6 +731,67 @@ class TriageAndRepairGateTests(unittest.TestCase):
         self.assertEqual(result["status"], "partial")
         self.assertRegex(" ".join(result["missing"]), r"repro\.mp4.*unknown")
 
+    def test_unknown_attachment_container_shape_fails_closed(self) -> None:
+        issue = {
+            "attachments": {"unexpected": {"name": "repro.png"}},
+            "comments": [
+                {
+                    "id": "comment-attachment-container",
+                    "content_text": "附件见评论。",
+                    "attachments": {"unexpected": {"name": "comment.png"}},
+                }
+            ],
+            "evidence_fetch": complete_evidence(),
+        }
+
+        result = runner.issue_evidence_state(issue)
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["status"], "partial")
+        self.assertIn(
+            "attachment container shape is not a readable list",
+            result["missing"],
+        )
+
+    def test_inspected_attachments_without_factual_summaries_fail_closed(self) -> None:
+        issue = {
+            "attachments": [
+                {
+                    "name": "top-level.png",
+                    "decision_relevant": True,
+                    "inspection_state": "inspected",
+                    "summary": "",
+                }
+            ],
+            "comments": [
+                {
+                    "id": "comment-empty-summary",
+                    "content_text": "评论附件已打开。",
+                    "attachments": [
+                        {
+                            "name": "comment.mp4",
+                            "decision_relevant": True,
+                            "inspection_state": "inspected",
+                        }
+                    ],
+                }
+            ],
+            "evidence_fetch": complete_evidence(),
+        }
+
+        result = runner.issue_evidence_state(issue)
+
+        self.assertFalse(result["complete"])
+        self.assertEqual(result["status"], "partial")
+        self.assertIn(
+            "attachment top-level.png was inspected but its factual summary is empty",
+            result["missing"],
+        )
+        self.assertIn(
+            "attachment comment.mp4 was inspected but its factual summary is empty",
+            result["missing"],
+        )
+
     def test_new_comment_or_media_finding_changes_plan_fingerprint(self) -> None:
         issue = {
             "id": "7",
@@ -445,6 +799,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
             "title": "详情页错位",
             "comments": [{"id": "comment-1", "content_text": "首次复现。", "attachments": []}],
             "evidence_fetch": complete_evidence("Screenshot shows a narrow-screen overflow."),
+            "report_quality": sufficient_report_quality(),
         }
         item = {
             "repository_match": "current-repo",
@@ -496,6 +851,7 @@ class TriageAndRepairGateTests(unittest.TestCase):
                 "effort": "blocked",
                 "risk": "medium",
                 "evidence_complete": False,
+                "report_quality_complete": True,
             }
             args = argparse.Namespace(
                 config="unused",
@@ -533,6 +889,59 @@ class TriageAndRepairGateTests(unittest.TestCase):
             self.assertNotIn("## 实施步骤", artifact)
             self.assertNotIn("## 远程工单策略", artifact)
 
+    def test_daily_report_shows_information_quality_and_feedback_draft(self) -> None:
+        exact_question = "请明确保存后应保留哪些字段，以及以哪个页面状态作为验收通过。"
+        feedback_draft = (
+            "已核对 BUG-DAILY 的详情、评论和附件，当前信息尚不足以进入修复。\n"
+            f"1. {exact_question}"
+        )
+        report = runner.render_daily_markdown(
+            [
+                {
+                    "issue": "BUG-DAILY",
+                    "id": "daily-1",
+                    "title": "保存结果不明确",
+                    "priority": "P1",
+                    "status": "待修复",
+                    "date": "2026-07-13",
+                    "reporter": "测试同学",
+                    "assignee": "当前用户",
+                    "repository_match": "current-repo",
+                    "ownership": "frontend-owned",
+                    "readiness": "ask-for-confirmation",
+                    "effort": "blocked",
+                    "risk": "medium",
+                    "confirmation_required": False,
+                    "evidence_complete": True,
+                    "report_quality_status": "needs-clarification",
+                    "report_quality_complete": False,
+                    "report_quality_assessed_at": "2026-07-13T10:05:00+08:00",
+                    "report_quality_assessment_current": True,
+                    "report_quality_facts": ["保存操作已执行，但返回页面后的保留范围不明确。"],
+                    "report_quality_evidence_refs": ["description", "comment comment-1"],
+                    "report_quality_missing_fields": [
+                        {
+                            "field": "acceptance_criteria",
+                            "reason": "没有可判定通过的验收口径。",
+                            "question": exact_question,
+                        }
+                    ],
+                    "report_quality_conflicts": [],
+                    "questions": [exact_question],
+                    "feedback_targets": ["测试/产品"],
+                    "feedback_draft": feedback_draft,
+                    "feedback_publish_status": "draft-only",
+                }
+            ]
+        )
+
+        self.assertIn("工单信息", report)
+        self.assertIn("待补充", report)
+        self.assertIn("## 工单描述待补充", report)
+        self.assertIn(exact_question, report)
+        self.assertIn(feedback_draft, report)
+        self.assertIn("发布状态: draft-only", report)
+
 
 class AssigneeFilterTests(unittest.TestCase):
     def test_exported_json_defaults_to_current_assignee_only(self) -> None:
@@ -567,6 +976,209 @@ class AssigneeFilterTests(unittest.TestCase):
 
         self.assertEqual(tokens, set())
         self.assertEqual(mode, "explicit-all-assignees")
+
+
+class PreviewWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def config() -> dict[str, object]:
+        return {
+            "project": {"name": "web-client", "role_assumption": "frontend"},
+            "issue_source": {"platform": "jira"},
+            "query_policy": {
+                "assigned_to": "zhanghang",
+                "assignee_aliases": ["user-7"],
+            },
+            "requirement_mapping": {
+                "current_repo": {
+                    "repo_key": "web-client",
+                    "path": ".",
+                    "aliases": ["web client"],
+                },
+                "related_repositories": [],
+                "demand_rules": [],
+            },
+            "execution_policy": {
+                "auto_fix_allowed": True,
+                "auto_fix_low_risk_frontend": True,
+                "max_auto_fix_effort": "medium",
+            },
+        }
+
+    @staticmethod
+    def args(input_path: Path, root: Path, *, json_output: bool) -> argparse.Namespace:
+        return argparse.Namespace(
+            config="unused",
+            local_config="",
+            root=str(root),
+            input=str(input_path),
+            platform="jira",
+            assignee=None,
+            include_all_assignees=False,
+            report="",
+            json=json_output,
+        )
+
+    def test_preview_is_fast_provisional_and_writes_no_bugflow_artifacts(self) -> None:
+        payload = [
+            {
+                "id": "preview-1",
+                "key": "BUG-PREVIEW-1",
+                "title": "web client 按钮颜色不一致",
+                "description": "当前页按钮颜色与设计稿不一致。",
+                "assignee": "zhanghang",
+                "requirements": [{"id": "REQ-1", "title": "web client"}],
+            },
+            {
+                "id": "preview-2",
+                "key": "BUG-PREVIEW-2",
+                "title": "其他负责人的问题",
+                "description": "不应进入本次扫描。",
+                "assignee": "someone-else",
+                "requirements": [{"id": "REQ-2", "title": "web client"}],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir)
+            input_path = worktree / "issues.json"
+            input_path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            root = worktree / ".bugflow/issues"
+            output = io.StringIO()
+
+            with mock.patch.object(
+                runner, "load_config", return_value=self.config()
+            ), mock.patch.object(
+                runner,
+                "report_quality_input_hash",
+                side_effect=AssertionError("preview must not calculate a strict report-quality hash"),
+            ), mock.patch.object(
+                runner,
+                "issue_evidence_state",
+                side_effect=AssertionError("preview must not run the strict evidence gate"),
+            ), contextlib.redirect_stdout(output):
+                result = runner.preview(self.args(input_path, root, json_output=True))
+
+            preview = json.loads(output.getvalue())
+            self.assertEqual(result, 0)
+            self.assertEqual(preview["mode"], "preview")
+            self.assertEqual(preview["count"], 1)
+            self.assertEqual(preview["assignee_filter"]["skipped_assignee_count"], 1)
+            item = preview["items"][0]
+            self.assertEqual(item["issue"], "BUG-PREVIEW-1")
+            self.assertIs(item["provisional"], True)
+            self.assertIs(item["repair_allowed"], False)
+            self.assertEqual(item["next_step"], "fix-ready")
+            self.assertEqual(item["preview_report_quality"], "not-assessed")
+            self.assertNotIn("plan_fingerprint", item)
+            self.assertNotIn("readiness", item)
+            self.assertNotIn("evidence_status", item)
+            self.assertNotIn("auto-fix-candidate", json.dumps(item, ensure_ascii=False))
+            self.assertFalse(root.exists())
+
+            report = runner.render_preview_markdown(
+                preview["items"], preview["assignee_filter"]
+            )
+            self.assertIn("初步判断", report)
+            self.assertIn("fix-ready", report)
+
+    def test_preview_result_cannot_authorize_plan_or_repair(self) -> None:
+        item = {
+            "issue": "BUG-PREVIEW-GATE",
+            "repository_match": "current-repo",
+            "ownership": "frontend-owned",
+            "readiness": "auto-fix-candidate",
+            "effort": "easy",
+            "risk": "low",
+            "provisional": True,
+            "repair_allowed": False,
+            "next_step": "fix-ready",
+        }
+
+        status, blockers = runner.repair_gate(self.config(), item, approved=True)
+
+        self.assertEqual(status, "blocked")
+        self.assertRegex(
+            " ".join(blockers).lower(), r"evidence|report-quality|acceptance"
+        )
+        self.assertNotIn("plan_fingerprint", item)
+
+
+class ExistingDailyWorkflowTests(unittest.TestCase):
+    @staticmethod
+    def config(root: Path) -> dict[str, object]:
+        return {
+            "project": {"name": "web-client", "role_assumption": "frontend"},
+            "bugflow": {"root": str(root)},
+            "requirement_mapping": {
+                "current_repo": {
+                    "repo_key": "web-client",
+                    "path": ".",
+                    "aliases": ["web client"],
+                },
+                "related_repositories": [],
+                "demand_rules": [],
+            },
+            "execution_policy": {
+                "auto_fix_allowed": True,
+                "auto_fix_low_risk_frontend": True,
+            },
+        }
+
+    @staticmethod
+    def issue(number: str) -> dict[str, object]:
+        return bind_report_quality(
+            {
+                "source": "test",
+                "id": number.lower(),
+                "number": number,
+                "title": "web client 按钮颜色不一致",
+                "description": "只调整 web client 当前页面按钮的 CSS 颜色。",
+                "status": "待修复",
+                "assignee": "zhanghang",
+                "requirements": [{"id": "REQ-1", "title": "web client"}],
+                "evidence_fetch": complete_evidence(),
+                "report_quality": sufficient_report_quality(
+                    "按钮颜色的实际值与期望主题色已明确。",
+                    evidence_refs=["description"],
+                ),
+            }
+        )
+
+    def test_daily_existing_only_triages_explicit_issue_without_overwriting_assessment(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / ".bugflow/issues"
+            selected = self.issue("BUG-SELECTED")
+            historical = self.issue("BUG-HISTORICAL")
+            selected_dir = runner.write_issue_json(root, selected)
+            historical_dir = runner.write_issue_json(root, historical)
+            selected_before = (selected_dir / "issue.json").read_bytes()
+            historical_triage_before = (historical_dir / "triage.md").read_bytes()
+            args = argparse.Namespace(
+                config="unused",
+                local_config="",
+                root=str(root),
+                issue=["BUG-SELECTED"],
+                report="",
+                assignee=["zhanghang"],
+                include_all_assignees=False,
+            )
+
+            with mock.patch.object(
+                runner, "load_config", return_value=self.config(root)
+            ), contextlib.redirect_stdout(io.StringIO()):
+                result = runner.daily_existing(args)
+
+            selected_after = json.loads(
+                (selected_dir / "issue.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual((selected_dir / "issue.json").read_bytes(), selected_before)
+            self.assertEqual(selected_after["report_quality"], selected["report_quality"])
+            self.assertEqual(
+                runner.artifact_frontmatter_status(selected_dir / "triage.md"), "done"
+            )
+            self.assertEqual(
+                (historical_dir / "triage.md").read_bytes(), historical_triage_before
+            )
 
 
 class VerificationTests(unittest.TestCase):
@@ -966,14 +1578,15 @@ class MqlSafetyTests(unittest.TestCase):
 class WorkflowDependencyTests(unittest.TestCase):
     @staticmethod
     def issue() -> dict[str, object]:
-        return {
+        return bind_report_quality({
             "source": "test",
             "id": "7",
             "number": "BUG-7",
             "title": "Dependency gate",
             "requirements": [],
             "evidence_fetch": complete_evidence(),
-        }
+            "report_quality": sufficient_report_quality(),
+        })
 
     @staticmethod
     def config(root: Path) -> dict[str, object]:
@@ -1012,14 +1625,27 @@ class WorkflowDependencyTests(unittest.TestCase):
     def test_record_verification_requires_completed_implementation(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "issues"
-            target = runner.write_issue_json(root, self.issue())
-            for artifact_id in ("requirement-match", "triage-report", "fix-plan"):
-                runner.write_markdown_artifact(
-                    runner.artifact_path(target, artifact_id),
-                    artifact_id,
-                    "done",
-                    f"# {artifact_id}\n",
-                )
+            issue = self.issue()
+            target = runner.write_issue_json(root, issue)
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "requirement-match"),
+                "requirement-match",
+                "done",
+                "# requirement-match\n",
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "triage-report"),
+                "triage-report",
+                "done",
+                "# triage-report\n",
+                current_triage_metadata(issue),
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "fix-plan"),
+                "fix-plan",
+                "done",
+                "# fix-plan\n",
+            )
             args = argparse.Namespace(
                 config="unused",
                 local_config="",
@@ -1051,16 +1677,23 @@ class WorkflowDependencyTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree = Path(temp_dir)
             root = worktree / "issues"
-            target = runner.write_issue_json(root, self.issue())
+            issue = self.issue()
+            target = runner.write_issue_json(root, issue)
             (worktree / "src").mkdir()
             (worktree / "src/file.py").write_text("print('change')\n", encoding="utf-8")
-            for artifact_id in ("requirement-match", "triage-report"):
-                runner.write_markdown_artifact(
-                    runner.artifact_path(target, artifact_id),
-                    artifact_id,
-                    "done",
-                    f"# {artifact_id}\n",
-                )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "requirement-match"),
+                "requirement-match",
+                "done",
+                "# requirement-match\n",
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "triage-report"),
+                "triage-report",
+                "done",
+                "# triage-report\n",
+                current_triage_metadata(issue),
+            )
             runner.write_markdown_artifact(
                 runner.artifact_path(target, "fix-plan"),
                 "fix-plan",
@@ -1093,21 +1726,105 @@ class WorkflowDependencyTests(unittest.TestCase):
                 runner.artifact_frontmatter_status(target / "implementation.md"), "done"
             )
 
+    def test_legacy_approved_artifacts_without_report_quality_cannot_continue(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            worktree = Path(temp_dir)
+            root = worktree / "issues"
+            issue = self.issue()
+            target = runner.write_issue_json(root, issue)
+            (worktree / "src").mkdir()
+            (worktree / "src/file.py").write_text("print('change')\n", encoding="utf-8")
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "requirement-match"),
+                "requirement-match",
+                "done",
+                "# legacy matched\n",
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "triage-report"),
+                "triage-report",
+                "done",
+                "# legacy triage without report-quality metadata\n",
+                {
+                    "repository_match": "current-repo",
+                    "confidence": "high",
+                    "confirmation_required": False,
+                    "ownership": "frontend-owned",
+                    "effort": "easy",
+                    "readiness": "manual-review-first",
+                    "risk": "low",
+                    "evidence_complete": True,
+                },
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "fix-plan"),
+                "fix-plan",
+                "done",
+                "# legacy approved plan\n",
+                {
+                    "plan_fingerprint": "legacy-approved-plan",
+                    "fix_approved": True,
+                    "planned_files": ["src/file.py"],
+                },
+            )
+            args = argparse.Namespace(
+                config="unused",
+                local_config="",
+                root=str(root),
+                issue="BUG-7",
+                summary=["Must not reuse legacy approval"],
+                files=["src/file.py"],
+                remote_status="未修改",
+                commit="",
+                notes="",
+                blocked="",
+            )
+
+            with working_directory(worktree), mock.patch.object(
+                runner, "load_config", return_value=self.config(root)
+            ):
+                self.assertNotEqual(
+                    runner.artifact_effective_status(target, "triage-report"),
+                    "done",
+                )
+                self.assertNotEqual(
+                    runner.artifact_effective_status(target, "fix-plan"),
+                    "done",
+                )
+                with self.assertRaises(SystemExit) as raised:
+                    with contextlib.redirect_stdout(io.StringIO()):
+                        runner.record_implementation(args)
+
+            self.assertRegex(
+                str(raised.exception).lower(),
+                r"report.?quality|triage|fix.?plan|upstream|stale|current|regenerate",
+            )
+            self.assertNotEqual(
+                runner.artifact_frontmatter_status(target / "implementation.md"), "done"
+            )
+
     def test_record_implementation_must_match_approved_plan_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             worktree = Path(temp_dir)
             root = worktree / "issues"
-            target = runner.write_issue_json(root, self.issue())
+            issue = self.issue()
+            target = runner.write_issue_json(root, issue)
             (worktree / "src").mkdir()
             (worktree / "src/planned.py").write_text("print('planned')\n", encoding="utf-8")
             (worktree / "src/other.py").write_text("print('other')\n", encoding="utf-8")
-            for artifact_id in ("requirement-match", "triage-report"):
-                runner.write_markdown_artifact(
-                    runner.artifact_path(target, artifact_id),
-                    artifact_id,
-                    "done",
-                    f"# {artifact_id}\n",
-                )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "requirement-match"),
+                "requirement-match",
+                "done",
+                "# requirement-match\n",
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "triage-report"),
+                "triage-report",
+                "done",
+                "# triage-report\n",
+                current_triage_metadata(issue),
+            )
             runner.write_markdown_artifact(
                 runner.artifact_path(target, "fix-plan"),
                 "fix-plan",
@@ -1147,7 +1864,8 @@ class WorkflowDependencyTests(unittest.TestCase):
     def test_plan_approved_lightweight_verification_records_done(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir) / "issues"
-            target = runner.write_issue_json(root, self.issue())
+            issue = self.issue()
+            target = runner.write_issue_json(root, issue)
             runner.write_markdown_artifact(
                 runner.artifact_path(target, "requirement-match"),
                 "requirement-match",
@@ -1159,16 +1877,16 @@ class WorkflowDependencyTests(unittest.TestCase):
                 "triage-report",
                 "done",
                 "# triage\n",
-                {
-                    "repository_match": "current-repo",
-                    "confidence": "high",
-                    "confirmation_required": False,
-                    "ownership": "frontend-owned",
-                    "effort": "medium",
-                    "readiness": "manual-review-first",
-                    "risk": "medium",
-                    "evidence_complete": True,
-                },
+                current_triage_metadata(
+                    issue,
+                    repository_match="current-repo",
+                    confidence="high",
+                    confirmation_required=False,
+                    ownership="frontend-owned",
+                    effort="medium",
+                    readiness="manual-review-first",
+                    risk="medium",
+                ),
             )
             runner.write_markdown_artifact(
                 runner.artifact_path(target, "fix-plan"),
@@ -1219,6 +1937,60 @@ class WorkflowDependencyTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertEqual(metadata["verification_mode"], runner.LIGHTWEIGHT_VERIFICATION_MODE)
             self.assertEqual(metadata["lightweight_approved"], "true")
+
+    def test_lightweight_verification_requires_complete_report_quality(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir) / "issues"
+            target = runner.write_issue_json(root, self.issue())
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "requirement-match"),
+                "requirement-match",
+                "done",
+                "# matched\n",
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "triage-report"),
+                "triage-report",
+                "done",
+                "# triage\n",
+                {
+                    "repository_match": "current-repo",
+                    "confidence": "high",
+                    "confirmation_required": False,
+                    "ownership": "frontend-owned",
+                    "effort": "easy",
+                    "readiness": "manual-review-first",
+                    "risk": "low",
+                    "evidence_complete": True,
+                    "report_quality_complete": False,
+                    "triage_policy_version": runner.REPORT_QUALITY_POLICY_VERSION,
+                },
+            )
+            runner.write_markdown_artifact(
+                runner.artifact_path(target, "fix-plan"),
+                "fix-plan",
+                "done",
+                "# approved lightweight plan\n",
+                {
+                    "plan_fingerprint": "light-plan",
+                    "fix_approved": True,
+                    "verification_mode": runner.LIGHTWEIGHT_VERIFICATION_MODE,
+                    "completion_actions": ["commit"],
+                },
+            )
+            args = argparse.Namespace(mode=runner.LIGHTWEIGHT_VERIFICATION_MODE)
+            config = {
+                "execution_policy": {"allow_lightweight_verification": True},
+            }
+
+            with mock.patch.object(
+                runner, "artifact_effective_status", return_value="done"
+            ):
+                blockers = runner.lightweight_verification_blockers(config, target, args)
+
+            self.assertRegex(
+                " ".join(blockers).lower(), r"issue information|implementation|acceptance"
+            )
 
 
 class GitCommitSafetyTests(unittest.TestCase):
@@ -1281,7 +2053,7 @@ class GitCommitSafetyTests(unittest.TestCase):
 
     @staticmethod
     def workflow_issue() -> dict[str, object]:
-        return {
+        return bind_report_quality({
             "source": "test",
             "id": "1",
             "number": "BUG-1",
@@ -1290,7 +2062,8 @@ class GitCommitSafetyTests(unittest.TestCase):
             "status": "OPEN",
             "requirements": [{"id": "REQ-1", "title": "web client"}],
             "evidence_fetch": complete_evidence(),
-        }
+            "report_quality": sufficient_report_quality(),
+        })
 
     @staticmethod
     def commit_args(
@@ -1690,7 +2463,7 @@ class GitCommitSafetyTests(unittest.TestCase):
 
                 self.assertRegex(
                     str(raised.exception).lower(),
-                    r"upstream|implementation|fix.?plan|verification|stale",
+                    r"upstream|implementation|fix.?plan|verification|stale|triage|report.?quality|policy",
                 )
                 self.assertEqual(self.git(repo, "rev-parse", "HEAD").stdout.strip(), baseline)
 
@@ -1948,6 +2721,135 @@ class RawPayloadRedactionTests(unittest.TestCase):
             "evidence-sign",
         ):
             self.assertIn(secret, serialized)
+
+    def test_report_quality_states_are_normalized(self) -> None:
+        cases = {
+            "ready": "sufficient",
+            "clarification-required": "needs-clarification",
+            "conflict": "conflicting",
+            "not-a-real-state": "unknown",
+        }
+
+        for raw_status, expected in cases.items():
+            with self.subTest(raw_status=raw_status):
+                quality = normalizer.normalize_report_quality({"status": raw_status})
+                self.assertEqual(quality["status"], expected)
+
+    def test_report_quality_hash_is_stable_after_second_requirement_normalization(self) -> None:
+        payload = {
+            "id": "BUG-REQ-HASH",
+            "number": "BUG-REQ-HASH",
+            "title": "Requirement hash stability",
+            "description": "The linked requirement is already normalized on the second pass.",
+            "requirements": [
+                {
+                    "work_item_id": "req-7",
+                    "auto_number": "REQ-7",
+                    "name": "web client detail page",
+                    "web_url": "https://example.invalid/requirements/7",
+                }
+            ],
+            "evidence_fetch": complete_evidence(),
+        }
+
+        first = normalizer.normalize_issue(payload, "jira", {})
+        second = normalizer.normalize_issue(first, "jira", {})
+
+        self.assertEqual(first["requirements"][0]["id"], "req-7")
+        self.assertEqual(first["requirements"], second["requirements"])
+        self.assertEqual(
+            runner.report_quality_input_hash(first),
+            runner.report_quality_input_hash(second),
+        )
+
+    def test_full_width_secret_assignments_and_mcp_url_are_redacted(self) -> None:
+        payload = {
+            "id": "BUG-FULL-WIDTH-SECRETS",
+            "title": "Secret redaction with Chinese punctuation",
+            "description": (
+                "密码：full-width-password\n"
+                "令牌＝full-width-token\n"
+                "MCP URL：https://mcp.example.invalid/connect?token=mcp-query-token"
+            ),
+        }
+
+        normalized = normalizer.normalize_issue(payload, "jira", {})
+        serialized = json.dumps(normalized, ensure_ascii=False)
+
+        for secret in (
+            "full-width-password",
+            "full-width-token",
+            "mcp.example.invalid",
+            "mcp-query-token",
+        ):
+            self.assertNotIn(secret, serialized)
+        self.assertGreaterEqual(serialized.count(normalizer.REDACTED), 3)
+
+    def test_new_report_fields_and_quality_are_canonical_and_redacted(self) -> None:
+        payload = {
+            "id": "BUG-QUALITY",
+            "title": "Report quality normalization",
+            "steps_to_reproduce": (
+                "Open https://example.invalid/repro?token=repro-secret then save."
+            ),
+            "actual_behavior": "Request logged Bearer actual-secret",
+            "expected_behavior": "Saved values remain visible after reopening.",
+            "acceptance": "Reopen twice and all saved values remain visible.",
+            "test_environment": "Chrome 136, 375px viewport",
+            "sample_data": "https://example.invalid/item?id=7&signature=data-secret",
+            "suggested_fix": "Frontend could reverse the current page.",
+            "issue_quality": {
+                "status": "clarification-required",
+                "facts": ["Save succeeds but the reopened view is unclear."],
+                "evidence_refs": [
+                    "https://example.invalid/comment?token=evidence-secret"
+                ],
+                "missing_fields": {
+                    "field": "expected_result",
+                    "reason": "Expected value is not listed.",
+                    "question": (
+                        "Which value should appear? "
+                        "https://example.invalid/question?sign=question-secret"
+                    ),
+                    "target": "tester",
+                },
+                "feedback_targets": "tester",
+                "feedback_draft": "Bearer feedback-secret",
+            },
+        }
+
+        normalized = normalizer.normalize_issue(payload, "jira", {})
+        quality = normalized["report_quality"]
+        serialized = json.dumps(normalized, ensure_ascii=False)
+
+        self.assertNotIn("repro-secret", normalized["reproduction_steps"])
+        self.assertIn(normalizer.REDACTED, normalized["actual_result"])
+        self.assertEqual(
+            normalized["expected_result"],
+            "Saved values remain visible after reopening.",
+        )
+        self.assertEqual(
+            normalized["acceptance_criteria"],
+            "Reopen twice and all saved values remain visible.",
+        )
+        self.assertEqual(normalized["environment"], "Chrome 136, 375px viewport")
+        self.assertNotIn("data-secret", normalized["test_data"])
+        self.assertEqual(
+            normalized["implementation_suggestion"],
+            "Frontend could reverse the current page.",
+        )
+        self.assertEqual(quality["status"], "needs-clarification")
+        self.assertEqual(quality["missing_fields"][0]["field"], "expected_result")
+        self.assertEqual(quality["feedback_targets"], ["tester"])
+        for secret in (
+            "repro-secret",
+            "actual-secret",
+            "data-secret",
+            "evidence-secret",
+            "question-secret",
+            "feedback-secret",
+        ):
+            self.assertNotIn(secret, serialized)
 
     def test_comments_activities_and_evidence_are_canonical_top_level_fields(self) -> None:
         payload = {

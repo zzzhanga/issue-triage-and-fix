@@ -1,4 +1,4 @@
 interface:
   display_name: "缺陷分诊与修复"
-  short_description: "读取评论与媒体证据后分诊指派缺陷，并受控修复闭环"
-  default_prompt: "使用 $issue-triage-and-fix 只拉取分配给我的工单，先读取完整详情、历史评论并检查图片/视频附件，再判断归属和风险；批准具体计划后按标准或轻量验证完成计划内提交与飞书状态流转。"
+  short_description: "默认快速扫描；选定工单后读全证据并受控修复闭环"
+  default_prompt: "使用 $issue-triage-and-fix 只处理分配给我的工单。只分诊/扫描/日报时走 preview：基于可用摘要给暂定归属、风险、优先级和疑似信息缺口，不生成逐工单工件或运行验证。等我选中具体工单后再进入 fix-ready，读全详情、评论与媒体证据，严格评估可实施/验收性，并仅在具体计划获批后受控修复闭环。"

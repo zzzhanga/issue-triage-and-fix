@@ -21,11 +21,37 @@ STANDARD_FIELDS = {
     "assignee": ["assignee", "current_status_operator", "owner"],
     "reporter": ["reporter", "owner", "created_by", "creator"],
     "description": ["description", "body", "content"],
+    "reproduction_steps": [
+        "reproduction_steps",
+        "steps_to_reproduce",
+        "repro_steps",
+        "reproduce_steps",
+        "复现步骤",
+    ],
+    "actual_result": ["actual_result", "actual_behavior", "actual", "实际结果", "实际表现"],
+    "expected_result": [
+        "expected_result",
+        "expected_behavior",
+        "expected",
+        "预期结果",
+        "期望结果",
+    ],
+    "acceptance_criteria": ["acceptance_criteria", "acceptance", "验收标准", "验收口径"],
+    "environment": ["environment", "runtime_environment", "test_environment", "测试环境"],
+    "test_data": ["test_data", "sample_data", "account_and_data", "测试数据", "测试账号"],
+    "implementation_suggestion": [
+        "implementation_suggestion",
+        "suggested_fix",
+        "fix_suggestion",
+        "修改建议",
+        "实现建议",
+    ],
     "requirements": ["requirements", "_field_linked_story", "requirement", "demand", "story", "related_requirement", "需求"],
     "attachments": ["attachments", "files", "field_696151"],
     "comments": ["comments", "comment_list", "work_item_comments"],
     "activities": ["activities", "activity_list", "op_records", "operation_records"],
     "evidence_fetch": ["evidence_fetch", "evidence_review"],
+    "report_quality": ["report_quality", "specification_quality", "issue_quality"],
     "created_at": ["created_at", "created", "created_time", "start_time", "field_eea32c"],
     "updated_at": ["updated_at", "updated", "modified_at"],
     "source_url": ["source_url", "url", "link", "web_url"],
@@ -43,7 +69,19 @@ SENSITIVE_KEYS_EXACT = {
     "xmeegofilesign",
 }
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+SENSITIVE_HEADER_PATTERN = re.compile(
+    r"(?im)(?<![A-Za-z0-9_])(authorization|cookie|mcp(?:\s+|[_-])?url)\s*[:：]\s*[^\r\n]+"
+)
+SENSITIVE_ASSIGNMENT_PATTERN = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(authorization|cookie|password|passwd|pwd|access[_-]?token|refresh[_-]?token|"
+    r"api[_-]?key|token|secret|session(?:[_-]?(?:id|token))?|mcp(?:\s+|[_-])?url)"
+    r"\s*([:=：＝])\s*(?:(?:bearer|basic)\s+)?(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;，；]+)"
+)
+SENSITIVE_CJK_ASSIGNMENT_PATTERN = re.compile(
+    r"(密码|令牌|密钥|会话)\s*([:=：＝])\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;，；]+)"
+)
 EVIDENCE_SOURCE_STATES = {"complete", "partial", "not-applicable", "skipped", "error", "unknown"}
+REPORT_QUALITY_STATES = {"sufficient", "needs-clarification", "conflicting", "unknown"}
 SENSITIVE_KEY_PARTS = {
     "authorization",
     "bearer",
@@ -85,8 +123,24 @@ def redact_url(value: str) -> str:
 
 
 def redact_text(value: str) -> str:
-    redacted = re.sub(r"(?i)\bbearer\s+[^\s,;]+", f"Bearer {REDACTED}", value)
-    return URL_PATTERN.sub(lambda match: redact_url(match.group(0)), redacted)
+    redacted_urls: list[str] = []
+
+    def stash_url(match: re.Match[str]) -> str:
+        redacted_urls.append(redact_url(match.group(0)))
+        return f"__BUGFLOW_REDACTED_URL_{len(redacted_urls) - 1}__"
+
+    redacted = URL_PATTERN.sub(stash_url, value)
+    redacted = SENSITIVE_HEADER_PATTERN.sub(lambda match: f"{match.group(1)}: {REDACTED}", redacted)
+    redacted = re.sub(r"(?i)\bbearer\s+[^\s,;]+", f"Bearer {REDACTED}", redacted)
+    redacted = SENSITIVE_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", redacted
+    )
+    redacted = SENSITIVE_CJK_ASSIGNMENT_PATTERN.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}{REDACTED}", redacted
+    )
+    for index, url in enumerate(redacted_urls):
+        redacted = redacted.replace(f"__BUGFLOW_REDACTED_URL_{index}__", url)
+    return redacted
 
 
 def redact_sensitive_data(value: Any) -> Any:
@@ -217,7 +271,7 @@ def normalize_requirement_item(item: Any) -> dict[str, Any]:
             "title": item.get("title") or item.get("name") or item.get("label") or item.get("text"),
             "url": item.get("url") or item.get("link") or item.get("web_url"),
             "number": item.get("auto_number") or item.get("number"),
-            "raw": item,
+            "raw": item.get("raw", item),
         }
     return {"id": None, "title": str(item), "url": None, "raw": item}
 
@@ -260,6 +314,13 @@ def list_payload_items(value: Any, keys: tuple[str, ...]) -> list[Any]:
     return [value]
 
 
+def normalize_attachments(value: Any) -> list[Any]:
+    return list_payload_items(
+        value,
+        ("items", "attachments", "files", "data", "results", "file_list", "attachment_list"),
+    )
+
+
 def normalize_comment_item(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
         return {
@@ -278,7 +339,7 @@ def normalize_comment_item(item: Any) -> dict[str, Any]:
         "content_text": extract_plain_text(
             item.get("content_text") or item.get("plain_text") or item.get("content") or item.get("body") or item.get("text")
         ),
-        "attachments": item.get("attachments") or item.get("files") or [],
+        "attachments": normalize_attachments(item.get("attachments") or item.get("files")),
     }
 
 
@@ -335,11 +396,93 @@ def normalize_evidence_fetch(value: Any) -> dict[str, Any]:
     return result
 
 
+def normalize_string_list(value: Any) -> list[str]:
+    if value in (None, ""):
+        return []
+    values = value if isinstance(value, list) else [value]
+    return [text for item in values if (text := extract_plain_text(item).strip())]
+
+
+def normalize_report_quality_item(item: Any, *, conflict: bool = False) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        text = extract_plain_text(item).strip()
+        if conflict:
+            return {"topic": "unspecified", "sources": [], "reason": text, "question": "", "target": ""}
+        return {"field": "unspecified", "reason": text, "question": "", "target": ""}
+
+    if conflict:
+        return {
+            "topic": str(item.get("topic") or item.get("field") or "unspecified"),
+            "sources": normalize_string_list(item.get("sources") or item.get("source_refs")),
+            "reason": extract_plain_text(item.get("reason") or item.get("detail")).strip(),
+            "question": extract_plain_text(item.get("question")).strip(),
+            "target": extract_plain_text(item.get("target") or item.get("owner")).strip(),
+        }
+    return {
+        "field": str(item.get("field") or item.get("code") or "unspecified"),
+        "reason": extract_plain_text(item.get("reason") or item.get("detail")).strip(),
+        "question": extract_plain_text(item.get("question")).strip(),
+        "target": extract_plain_text(item.get("target") or item.get("owner")).strip(),
+    }
+
+
+def normalize_report_quality(value: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "unknown",
+        "assessed_at": None,
+        "input_hash": "",
+        "facts": [],
+        "evidence_refs": [],
+        "missing_fields": [],
+        "conflicts": [],
+        "questions": [],
+        "feedback_targets": [],
+        "feedback_draft": "",
+    }
+    if isinstance(value, dict):
+        result.update(value)
+    elif value not in (None, ""):
+        result["status"] = str(value)
+
+    status_aliases = {
+        "complete": "sufficient",
+        "ready": "sufficient",
+        "incomplete": "needs-clarification",
+        "clarification-required": "needs-clarification",
+        "needs-confirmation": "needs-clarification",
+        "needs_clarification": "needs-clarification",
+        "needs_confirmation": "needs-clarification",
+        "conflict": "conflicting",
+    }
+    status = str(result.get("status") or "unknown").strip().lower()
+    status = status_aliases.get(status, status)
+    result["status"] = status if status in REPORT_QUALITY_STATES else "unknown"
+
+    for key in ("facts", "evidence_refs", "questions", "feedback_targets"):
+        result[key] = normalize_string_list(result.get(key))
+
+    missing = result.get("missing_fields") or result.get("blocking_gaps") or []
+    if not isinstance(missing, list):
+        missing = [missing]
+    result["missing_fields"] = [normalize_report_quality_item(item) for item in missing]
+
+    conflicts = result.get("conflicts") or []
+    if not isinstance(conflicts, list):
+        conflicts = [conflicts]
+    result["conflicts"] = [normalize_report_quality_item(item, conflict=True) for item in conflicts]
+    result["feedback_draft"] = extract_plain_text(result.get("feedback_draft")).strip()
+    result["input_hash"] = str(
+        result.get("input_hash") or result.get("assessment_input_hash") or ""
+    ).strip()
+    return result
+
+
 def normalize_issue(
     issue: dict[str, Any],
     platform: str,
     mapping: dict[str, str],
     retain_raw: bool = False,
+    include_raw: bool = True,
 ) -> dict[str, Any]:
     raw_issue = issue
     issue = flatten_moql_record(issue)
@@ -357,21 +500,44 @@ def normalize_issue(
     normalized["assignee"] = normalize_assignee(normalized.get("assignee"))
     normalized["reporter"] = normalize_assignee(normalized.get("reporter"))
     normalized["requirements"] = normalize_requirements(normalized.get("requirements"))
-    normalized["attachments"] = normalized.get("attachments") or []
+    normalized["attachments"] = normalize_attachments(normalized.get("attachments"))
     normalized["comments"] = normalize_comments(normalized.get("comments"))
     normalized["activities"] = normalize_activities(normalized.get("activities"))
     normalized["evidence_fetch"] = normalize_evidence_fetch(normalized.get("evidence_fetch"))
+    normalized["report_quality"] = normalize_report_quality(normalized.get("report_quality"))
+    for field in (
+        "reproduction_steps",
+        "actual_result",
+        "expected_result",
+        "acceptance_criteria",
+        "environment",
+        "test_data",
+        "implementation_suggestion",
+    ):
+        normalized[field] = extract_plain_text(normalized.get(field)).strip()
     raw_payload = raw_issue.get("raw", raw_issue) if raw_issue.get("source") == platform else raw_issue
-    if retain_raw:
+    if retain_raw and include_raw:
         normalized["raw"] = raw_payload
-    else:
+    elif include_raw:
         normalized["raw"] = redact_sensitive_data(raw_payload)
+    if not retain_raw:
         normalized["requirements"] = redact_sensitive_data(normalized["requirements"])
         normalized["attachments"] = redact_sensitive_data(normalized["attachments"])
         normalized["comments"] = redact_sensitive_data(normalized["comments"])
         normalized["activities"] = redact_sensitive_data(normalized["activities"])
         normalized["evidence_fetch"] = redact_sensitive_data(normalized["evidence_fetch"])
-        for field in ("description", "source_url"):
+        normalized["report_quality"] = redact_sensitive_data(normalized["report_quality"])
+        for field in (
+            "description",
+            "source_url",
+            "reproduction_steps",
+            "actual_result",
+            "expected_result",
+            "acceptance_criteria",
+            "environment",
+            "test_data",
+            "implementation_suggestion",
+        ):
             if normalized.get(field) not in (None, ""):
                 normalized[field] = redact_sensitive_data(normalized[field])
     return normalized

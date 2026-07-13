@@ -1,13 +1,20 @@
 name: issue-triage-and-fix
 version: 1
-description: Artifact-guided workflow for normalized issue triage, approved repair, verification, and closure.
+description: Two-level workflow with an artifact-free preview scan by default and strict evidence/report-quality artifacts only after a concrete issue is selected for fix-ready repair.
 
 root: .bugflow/issues
+
+modes:
+  preview:
+    description: In-memory current-assignee scan with provisional ownership, risk, priority, ranking, and suspected information gaps; does not create per-issue artifacts or run code/build/browser/remote actions.
+    runner_command: preview
+  fix-ready:
+    description: User-selected issue workflow with full comments/activities/attachment evidence, bound report quality, requirement matching, strict triage, approved repair, verification, commit, and authorized remote actions.
 
 artifacts:
   - id: issue-intake
     generates: issue.json
-    description: Normalized tracker issue with requirement links, inbound comments, activities, inspected attachment summaries, and evidence completeness; raw source data is redacted unless explicitly retained.
+    description: Normalized tracker issue with requirement links, observable/reproduction/acceptance fields, inbound comments, activities, inspected attachment summaries, evidence completeness, report-quality status bound to the current evidence input hash, and any safe local clarification draft; raw source data is redacted unless explicitly retained.
     requires: []
   - id: requirement-match
     generates: requirement-match.md
@@ -16,12 +23,12 @@ artifacts:
       - issue-intake
   - id: triage-report
     generates: triage.md
-    description: Ownership, effort, readiness, risk, repair ranking, and redirect/reject evidence.
+    description: Evidence/report quality, ownership, effort, readiness, risk, repair ranking, redirect/reject evidence, and any unpublished clarification draft.
     requires:
       - requirement-match
   - id: fix-plan
     generates: fix-plan.md
-    description: Scoped implementation plan, verification mode, and completion actions before code edits.
+    description: Scoped implementation plan, verification mode, and completion actions after evidence is complete and report quality is sufficient.
     requires:
       - triage-report
   - id: implementation
@@ -31,7 +38,7 @@ artifacts:
       - fix-plan
   - id: verification
     generates: verification.md
-    description: Standard checks or approved lightweight inspection evidence, browser result, residual risk, and failures.
+    description: Standard checks or approved lightweight inspection evidence after both intake gates pass, browser result, residual risk, and failures.
     requires:
       - implementation
   - id: closure
@@ -41,6 +48,9 @@ artifacts:
       - verification
 
 actions:
+  preview:
+    creates: []
+    runner_command: preview
   fetch:
     creates:
       - issue-intake
@@ -70,3 +80,6 @@ actions:
     creates: []
   status:
     creates: []
+  report-existing:
+    creates: []
+    runner_command: daily-existing

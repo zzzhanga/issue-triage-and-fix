@@ -2,13 +2,26 @@
 
 Use this reference before changing a remote issue status.
 
+## Contents
+
+- [Defaults](#defaults)
+- [Authorization Predicate](#authorization-predicate)
+- [Report-Quality Clarification Comments](#report-quality-clarification-comments)
+- [Config Fields](#config-fields)
+- [Start Fix](#start-fix)
+- [Resolve For Acceptance](#resolve-for-acceptance)
+- [Complete Or Terminate](#complete-or-terminate)
+- [Mark Blocked](#mark-blocked)
+- [Transition Summary](#transition-summary)
+
 ## Defaults
 
-- Do not comment or change remote status unless `completion_action_authorized(issue, action)` is true.
+- Do not post repair/closure comments or change remote status unless `completion_action_authorized(issue, action)` is true. Report-quality clarification comments use the separate exact-draft rules below.
 - Treat code repair, local commit, comment, start-fix, resolve, complete, reopen, and terminate as distinct actions, but allow one exact fix-plan approval to cover several actions when every action is visibly listed in `completion_actions`.
 - In the Feishu starter, enable status updates plus the normal `start_fix` and `resolve_for_acceptance` capabilities. Keep comments, complete, and terminate disabled. This permits an approved repair workflow; it does not authorize or automatically execute a transition.
 - Keep every remote capability false for exported-JSON/non-native tracker starters.
 - Never transition blocked, unclear, or cross-owner issues as if they were repaired.
+- Treat a report-quality clarification draft as local-only by default. Do not post it merely because comments were read, a repair plan was approved, or comments are enabled.
 - `close-local` only writes `closure.md`; it is not a remote status update.
 
 ## Authorization Predicate
@@ -23,6 +36,19 @@ Use this reference before changing a remote issue status.
 
 Configuration alone is not user approval. A local `true` cannot override a project `false`, and plan approval cannot silently persist into later tasks. After approval, do not ask again between implementation, plan-approved verification, commit, and the listed normal status transitions.
 
+## Report-Quality Clarification Comments
+
+When `report_quality` is `needs-clarification` or `conflicting`, generate a local draft that states confirmed facts, cites evidence, lists missing/conflicting acceptance details, asks exact questions, names the intended tester/product/owner, and says what is blocked. Mark it not published.
+
+Posting that draft is a separate external write, not a repair completion action. Permit it only when all are true:
+
+1. The user explicitly authorizes the exact draft in the current task.
+2. `remote_status_policy.update_comments_allowed` is true after deny-only overrides.
+3. The target issue and audience are verified.
+4. The draft contains no credentials, signed URLs, private media, secret test data, or unnecessary personal information.
+
+Do not reuse `fix_approved(issue)`, `--approved`, a repair `plan_fingerprint`, or a plan-listed completion comment as this authorization. A modified draft requires fresh exact-draft authorization. The local runner does not post comments; use a configured native tracker capability only after these checks. Scheduled triage never posts clarification drafts.
+
 ## Config Fields
 
 Read:
@@ -35,7 +61,7 @@ Read:
 - `statuses`
 - `status_transitions`
 
-For comments, also read `remote_status_policy.update_comments_allowed`. For any status change, require `remote_status_policy.update_status_allowed`. Treat missing values as `false`.
+For comments, also read `remote_status_policy.update_comments_allowed`. This capability gate does not create exact-draft authorization. For any status change, require `remote_status_policy.update_status_allowed`. Treat missing values as `false`.
 
 Common Feishu status labels are `待修复`, `修复中`, `已解决，待验收`, `重新打开`, `已完成`, and `已终止`. Prefer stable ids from field config; labels alone are not enough for API updates.
 

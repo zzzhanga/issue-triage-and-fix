@@ -35,6 +35,14 @@ ASSETS_DIR = SKILL_ROOT / "assets"
 CURRENT_LOGIN_USER = "current_login_user()"
 LIGHTWEIGHT_VERIFICATION_MODE = "lightweight"
 STANDARD_VERIFICATION_MODE = "standard"
+REPORT_QUALITY_POLICY_VERSION = "2"
+REPORT_QUALITY_GATED_ARTIFACTS = {
+    "triage-report",
+    "fix-plan",
+    "implementation",
+    "verification",
+    "closure",
+}
 COMPLETION_ACTIONS = {
     "commit",
     "start-fix",
@@ -454,12 +462,59 @@ def artifact_frontmatter_status(path: Path) -> str:
 
 
 def artifact_effective_status(issue_root: Path, artifact_id: str) -> str:
-    return effective_artifact_status(issue_root, artifact_id)
+    status = effective_artifact_status(issue_root, artifact_id)
+    if status != "done" or artifact_id not in REPORT_QUALITY_GATED_ARTIFACTS:
+        return status
+
+    issue_path = issue_root / "issue.json"
+    if not issue_path.exists():
+        return "blocked"
+    try:
+        issue = json.loads(issue_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return "blocked"
+    evidence_state = issue_evidence_state(issue)
+    report_state = issue_report_quality_state(issue)
+    if not evidence_state["complete"] or not report_state["complete"]:
+        return "blocked"
+
+    triage_metadata = frontmatter_metadata(artifact_path(issue_root, "triage-report"))
+    if (
+        triage_metadata.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION
+        or triage_metadata.get("report_quality_complete") != "true"
+        or triage_metadata.get("evidence_complete") != "true"
+        or triage_metadata.get("report_quality_input_hash") != report_state["expected_input_hash"]
+    ):
+        return "blocked"
+    return status
 
 
 def require_artifact_done(issue_root: Path, artifact_id: str, action: str) -> None:
     status = artifact_effective_status(issue_root, artifact_id)
     if status != "done":
+        if artifact_id in REPORT_QUALITY_GATED_ARTIFACTS:
+            issue_path = issue_root / "issue.json"
+            if issue_path.exists():
+                try:
+                    issue = json.loads(issue_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    issue = {}
+                evidence_state = issue_evidence_state(issue)
+                quality_state = issue_report_quality_state(issue)
+                if not evidence_state["complete"]:
+                    raise SystemExit(
+                        f"Cannot {action}: inbound evidence is incomplete; refresh detail/comments/attachments and re-triage first."
+                    )
+                if not quality_state["complete"]:
+                    raise SystemExit(
+                        f"Cannot {action}: report-quality is {quality_state['status']} or stale; "
+                        "bind a complete assessment to the current evidence hash and re-triage first."
+                    )
+                triage_metadata = frontmatter_metadata(artifact_path(issue_root, "triage-report"))
+                if triage_metadata.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION:
+                    raise SystemExit(
+                        f"Cannot {action}: triage uses an older report-quality policy; regenerate triage first."
+                    )
         raise SystemExit(f"Cannot {action}: {artifact_id} is {status}; regenerate it first.")
 
 
@@ -494,7 +549,20 @@ def write_issue_json(root: Path, issue: dict[str, Any]) -> Path:
 
 def combined_text(issue: dict[str, Any]) -> str:
     parts: list[str] = []
-    for key in ("title", "description", "number", "id", "status", "priority"):
+    for key in (
+        "title",
+        "description",
+        "reproduction_steps",
+        "actual_result",
+        "expected_result",
+        "acceptance_criteria",
+        "environment",
+        "test_data",
+        "number",
+        "id",
+        "status",
+        "priority",
+    ):
         if issue.get(key):
             parts.append(str(issue[key]))
     for req in issue.get("requirements") or []:
@@ -552,17 +620,24 @@ def issue_evidence_state(issue: dict[str, Any]) -> dict[str, Any]:
         if isinstance(comment, dict)
     )
     for attachments in attachment_groups:
+        if attachments and not isinstance(attachments, list):
+            missing.append("attachment container shape is not a readable list")
+            continue
         for attachment in attachments if isinstance(attachments, list) else []:
             if isinstance(attachment, dict):
                 if attachment.get("decision_relevant") is False:
                     continue
                 name = attachment.get("name") or attachment.get("title") or attachment.get("id") or "unnamed attachment"
                 inspection_state = str(attachment.get("inspection_state") or "unknown").strip().lower()
+                summary = str(attachment.get("summary") or "").strip()
             else:
                 name = str(attachment) or "unnamed attachment"
                 inspection_state = "unknown"
+                summary = ""
             if inspection_state != "inspected":
                 missing.append(f"attachment {name} inspection is {inspection_state}")
+            elif not summary:
+                missing.append(f"attachment {name} was inspected but its factual summary is empty")
 
     deduped_missing = list(dict.fromkeys(missing))
     findings = [str(item) for item in evidence.get("findings") or [] if str(item).strip()]
@@ -574,6 +649,262 @@ def issue_evidence_state(issue: dict[str, Any]) -> dict[str, Any]:
         "sources": source_states,
         "findings": findings,
         "missing": deduped_missing,
+    }
+
+
+REPORT_QUALITY_QUESTION_DEFAULTS = {
+    "reproduction_steps": "请补充从进入页面到问题出现的最短复现步骤，以及触发问题所需的前置条件。",
+    "actual_result": "请明确当前实际发生了什么，并说明可以观察到的异常表现。",
+    "expected_result": "请明确期望用户最终看到或得到什么结果。",
+    "acceptance_criteria": "请补充可判定修复通过的验收标准或正常页面/设计稿参考。",
+    "environment": "请补充出现问题的环境、版本、设备、窗口尺寸或网络条件。",
+    "test_data": "请提供可安全共享的工单编号、样例数据或账号角色；不要发送密码、令牌或会话信息。",
+}
+REPORT_QUALITY_INPUT_FIELDS = (
+    "source",
+    "id",
+    "number",
+    "title",
+    "description",
+    "reproduction_steps",
+    "actual_result",
+    "expected_result",
+    "acceptance_criteria",
+    "environment",
+    "test_data",
+    "requirements",
+    "attachments",
+    "comments",
+    "activities",
+    "updated_at",
+)
+
+
+def report_quality_input_hash(issue: dict[str, Any]) -> str:
+    evidence = issue.get("evidence_fetch") or {}
+    evidence_snapshot = {
+        key: evidence.get(key)
+        for key in ("status", "detail", "comments", "activities", "media", "findings", "missing")
+    } if isinstance(evidence, dict) else evidence
+    snapshot = {key: issue.get(key) for key in REPORT_QUALITY_INPUT_FIELDS}
+    requirements = issue.get("requirements") or []
+    snapshot["requirements"] = [
+        {
+            key: item.get(key)
+            for key in ("id", "number", "title", "url")
+        }
+        if isinstance(item, dict)
+        else item
+        for item in requirements
+    ]
+    snapshot["evidence_fetch"] = evidence_snapshot
+    encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def text_list(value: Any) -> list[str]:
+    values = value if isinstance(value, list) else ([] if value in (None, "") else [value])
+    return [str(item).strip() for item in values if str(item).strip()]
+
+
+def report_quality_item_question(item: Any, *, conflict: bool = False) -> str:
+    if isinstance(item, dict):
+        explicit = str(item.get("question") or "").strip()
+        if explicit:
+            return explicit
+        if conflict:
+            topic = str(item.get("topic") or item.get("field") or "验收口径").strip()
+            return f"请确认“{topic}”的唯一最终口径，并由需求负责人更新工单或验收标准。"
+        field = str(item.get("field") or item.get("code") or "unspecified").strip()
+        return REPORT_QUALITY_QUESTION_DEFAULTS.get(
+            field,
+            "请补充缺失的可观察现象、期望结果或验收口径。",
+        )
+    text = str(item or "").strip()
+    return text
+
+
+def report_quality_feedback_draft(
+    issue: dict[str, Any],
+    status: str,
+    questions: list[str],
+    facts: list[str],
+    evidence_refs: list[str],
+    conflicts: list[Any],
+) -> str:
+    issue_label = issue.get("number") or issue.get("id") or "该工单"
+    if status == "unknown":
+        return "尚未完成工单信息完整度评估；请先核对详情、评论和附件后再决定是否需要对外追问。"
+    if not questions:
+        return ""
+    opening = (
+        f"已核对 {issue_label} 的详情、评论和附件，当前存在相互冲突的验收口径。请确认："
+        if status == "conflicting"
+        else f"已核对 {issue_label} 的详情、评论和附件，当前信息尚不足以进入修复。请补充："
+    )
+    context_lines: list[str] = []
+    if facts:
+        context_lines.append(f"已确认事实：{'；'.join(facts)}")
+    if evidence_refs:
+        context_lines.append(f"依据：{'；'.join(evidence_refs)}")
+    for conflict in conflicts:
+        if not isinstance(conflict, dict):
+            continue
+        sources = text_list(conflict.get("sources") or conflict.get("source_refs"))
+        if sources:
+            context_lines.append(
+                f"冲突来源（{conflict.get('topic') or '验收口径'}）：{'；'.join(sources)}"
+            )
+    context = ("\n" + "\n".join(context_lines)) if context_lines else ""
+    question_lines = "\n".join(f"{index}. {question}" for index, question in enumerate(questions, start=1))
+    return (
+        f"{opening}{context}\n{question_lines}\n"
+        "无需指定前后端、代码文件或具体实现；请明确可观察的实际表现、期望结果和验收标准即可。"
+    )
+
+
+def issue_report_quality_state(issue: dict[str, Any]) -> dict[str, Any]:
+    quality = issue.get("report_quality")
+    if not isinstance(quality, dict):
+        quality = {}
+
+    aliases = {
+        "complete": "sufficient",
+        "ready": "sufficient",
+        "incomplete": "needs-clarification",
+        "clarification-required": "needs-clarification",
+        "needs-confirmation": "needs-clarification",
+        "needs_clarification": "needs-clarification",
+        "needs_confirmation": "needs-clarification",
+        "conflict": "conflicting",
+    }
+    declared_status = str(quality.get("status") or "unknown").strip().lower()
+    declared_status = aliases.get(declared_status, declared_status)
+    if declared_status not in {"sufficient", "needs-clarification", "conflicting", "unknown"}:
+        declared_status = "unknown"
+    status = declared_status
+
+    missing_fields = quality.get("missing_fields") or quality.get("blocking_gaps") or []
+    if not isinstance(missing_fields, list):
+        missing_fields = [missing_fields]
+    conflicts = quality.get("conflicts") or []
+    if not isinstance(conflicts, list):
+        conflicts = [conflicts]
+    missing_fields = [item for item in missing_fields if item not in (None, "")]
+    conflicts = [item for item in conflicts if item not in (None, "")]
+    assessed_at = str(quality.get("assessed_at") or "").strip()
+    expected_input_hash = report_quality_input_hash(issue)
+    input_hash = str(quality.get("input_hash") or quality.get("assessment_input_hash") or "").strip()
+    assessment_current = (
+        declared_status != "unknown"
+        and bool(input_hash)
+        and input_hash == expected_input_hash
+    )
+    facts = text_list(quality.get("facts"))
+    evidence_refs = text_list(quality.get("evidence_refs"))
+    questions = text_list(quality.get("questions"))
+    questions.extend(report_quality_item_question(item) for item in missing_fields)
+    questions.extend(report_quality_item_question(item, conflict=True) for item in conflicts)
+    questions = list(dict.fromkeys(question for question in questions if question))
+    stale_assessment = declared_status != "unknown" and not assessment_current
+    if stale_assessment:
+        status = "unknown"
+        facts = []
+        evidence_refs = []
+        missing_fields = []
+        conflicts = []
+        questions = [
+            "工单证据已变化或本次评估未绑定当前证据快照；请重新核对详情、评论和附件后更新 report_quality.input_hash。"
+        ]
+    elif not assessed_at and declared_status != "unknown":
+        assessment_current = False
+        status = "unknown"
+        questions.insert(0, "请记录本次工单信息完整度评估时间 assessed_at。")
+    elif not evidence_refs and declared_status != "unknown":
+        assessment_current = False
+        status = "unknown"
+        questions.insert(0, "请记录支撑本次评估的工单描述、评论、需求文档或附件引用。")
+    elif assessment_current and conflicts:
+        status = "conflicting"
+    elif assessment_current and missing_fields:
+        status = "needs-clarification"
+    if status == "sufficient" and questions:
+        status = "needs-clarification"
+    if status == "sufficient" and not facts:
+        assessment_current = False
+        status = "unknown"
+        questions.insert(0, "请先提炼至少一条已确认事实，再将工单标记为信息充分。")
+    if status == "unknown" and not questions:
+        questions = ["先基于完整详情、历史评论和附件评估复现条件、实际结果、期望结果与验收标准是否明确。"]
+    elif status == "needs-clarification" and not questions:
+        questions = ["请补充当前缺失的复现条件、实际表现、期望结果或可判定的验收标准。"]
+    elif status == "conflicting" and not questions:
+        questions = ["请由需求负责人确认唯一的最终目标和验收口径，并同步更新工单。"]
+
+    targets = text_list(quality.get("feedback_targets"))
+    for item in [*missing_fields, *conflicts]:
+        if isinstance(item, dict) and str(item.get("target") or "").strip():
+            targets.append(str(item["target"]).strip())
+    target_aliases = {
+        "tester": "测试",
+        "qa": "测试",
+        "product": "产品",
+        "product-owner": "产品",
+        "reporter": "报告人",
+        "backend": "后端",
+    }
+    targets = [target_aliases.get(target.lower(), target) for target in targets]
+    targets = list(dict.fromkeys(targets))
+    if status in {"needs-clarification", "conflicting"} and not targets:
+        targets = ["测试/产品"]
+
+    evidence_complete = issue_evidence_state(issue)["complete"]
+    feedback_draft = str(quality.get("feedback_draft") or "").strip()
+    if not evidence_complete:
+        feedback_draft = "证据尚未读取完整，暂不生成可对外发送的澄清草稿；请先补齐详情、评论和决策相关附件。"
+        feedback_publish_status = "blocked-by-evidence"
+    elif not assessment_current or status == "unknown":
+        feedback_draft = "工单信息完整度评估尚未绑定当前证据快照，暂不生成可对外发送的澄清草稿。"
+        feedback_publish_status = "blocked-by-assessment"
+    elif status == "sufficient":
+        feedback_draft = ""
+        feedback_publish_status = "not-needed"
+    else:
+        if not feedback_draft:
+            feedback_draft = report_quality_feedback_draft(
+                issue,
+                status,
+                questions,
+                facts,
+                evidence_refs,
+                conflicts,
+            )
+        feedback_publish_status = "draft-only"
+
+    return {
+        "status": status,
+        "complete": (
+            status == "sufficient"
+            and assessment_current
+            and bool(assessed_at)
+            and bool(facts)
+            and bool(evidence_refs)
+            and not missing_fields
+            and not conflicts
+            and not questions
+        ),
+        "assessed_at": assessed_at,
+        "input_hash": input_hash,
+        "expected_input_hash": expected_input_hash,
+        "assessment_current": assessment_current,
+        "facts": facts,
+        "evidence_refs": evidence_refs,
+        "missing_fields": missing_fields,
+        "conflicts": conflicts,
+        "questions": questions,
+        "feedback_targets": targets,
+        "feedback_draft": feedback_draft,
+        "feedback_publish_status": feedback_publish_status,
     }
 
 
@@ -747,7 +1078,13 @@ def backend_owned_reason(config: dict[str, Any], title_desc: str) -> str:
     return ""
 
 
-def classify_issue(config: dict[str, Any], issue: dict[str, Any], match: dict[str, Any]) -> dict[str, Any]:
+def classify_issue(
+    config: dict[str, Any],
+    issue: dict[str, Any],
+    match: dict[str, Any],
+    *,
+    enforce_readiness_gates: bool = True,
+) -> dict[str, Any]:
     title_desc = combined_text(issue)
     match_state = match["repository_match"]
     if match_state == "current-repo":
@@ -840,15 +1177,59 @@ def classify_issue(config: dict[str, Any], issue: dict[str, Any], match: dict[st
         readiness = "redirect-to-owner"
         reason = "需求映射结果指向其他仓库。"
 
-    evidence_state = issue_evidence_state(issue)
+    if enforce_readiness_gates:
+        evidence_state = issue_evidence_state(issue)
+        report_quality_state = issue_report_quality_state(issue)
+    else:
+        # Preview deliberately skips the strict evidence and report-quality gates.
+        # In particular, do not calculate report_quality_input_hash for every
+        # candidate in a batch scan; the selected issue will do that in fix-ready.
+        evidence_state = {
+            "status": "not-assessed",
+            "complete": False,
+            "sources": {},
+            "findings": [],
+            "missing": [],
+        }
+        report_quality_state = {
+            "status": "not-assessed",
+            "complete": False,
+            "assessed_at": "",
+            "input_hash": "",
+            "expected_input_hash": "",
+            "assessment_current": False,
+            "facts": [],
+            "evidence_refs": [],
+            "missing_fields": [],
+            "conflicts": [],
+            "questions": [],
+            "feedback_targets": [],
+            "feedback_draft": "",
+            "feedback_publish_status": "not-generated",
+        }
     missing_information = [match["customer_confirmation_question"]] if match.get("confirmation_required") else []
+    blocking_reasons: list[str] = []
     if not evidence_state["complete"]:
+        blocking_reasons.append("证据获取不完整")
+        missing_information.extend(evidence_state["missing"] or ["Complete evidence intake before final triage."])
+    if not report_quality_state["complete"]:
+        if report_quality_state["status"] == "conflicting":
+            blocking_reasons.append("工单中的目标或验收口径相互冲突")
+        elif report_quality_state["status"] == "unknown":
+            blocking_reasons.append("尚未完成工单信息完整度评估")
+        else:
+            blocking_reasons.append("工单缺少足以实施或验收的信息")
+        missing_information.extend(report_quality_state["questions"])
+
+    if blocking_reasons and enforce_readiness_gates:
         preliminary = ownership
         effort = "blocked"
         readiness = "ask-for-confirmation"
         risk = "high" if risk == "high" else "medium"
-        reason = f"证据获取不完整，当前仅为初步归属判断（{preliminary}）；读取缺失证据后必须重新分诊。"
-        missing_information.extend(evidence_state["missing"] or ["Complete evidence intake before final triage."])
+        reason = (
+            f"{'；'.join(blocking_reasons)}，当前仅保留初步归属判断（{preliminary}）；"
+            "补齐证据并形成唯一、可观察的验收口径后必须重新分诊。"
+        )
 
     return {
         "ownership": ownership,
@@ -862,6 +1243,20 @@ def classify_issue(config: dict[str, Any], issue: dict[str, Any], match: dict[st
         "evidence_complete": evidence_state["complete"],
         "evidence_sources": evidence_state["sources"],
         "evidence_findings": evidence_state["findings"],
+        "report_quality_status": report_quality_state["status"],
+        "report_quality_complete": report_quality_state["complete"],
+        "report_quality_assessed_at": report_quality_state["assessed_at"],
+        "report_quality_input_hash": report_quality_state["input_hash"],
+        "report_quality_expected_input_hash": report_quality_state["expected_input_hash"],
+        "report_quality_assessment_current": report_quality_state["assessment_current"],
+        "report_quality_facts": report_quality_state["facts"],
+        "report_quality_evidence_refs": report_quality_state["evidence_refs"],
+        "report_quality_missing_fields": report_quality_state["missing_fields"],
+        "report_quality_conflicts": report_quality_state["conflicts"],
+        "report_quality_questions": report_quality_state["questions"],
+        "feedback_targets": report_quality_state["feedback_targets"],
+        "feedback_draft": report_quality_state["feedback_draft"],
+        "feedback_publish_status": report_quality_state["feedback_publish_status"],
     }
 
 
@@ -869,6 +1264,28 @@ def render_triage(issue: dict[str, Any], match: dict[str, Any], triage: dict[str
     missing = "\n".join(f"- {item}" for item in triage.get("missing_information") or []) or "- 无"
     findings = "\n".join(f"- {item}" for item in triage.get("evidence_findings") or []) or "- 无"
     evidence_sources = triage.get("evidence_sources") or {}
+    quality_facts = "\n".join(f"- {item}" for item in triage.get("report_quality_facts") or []) or "- 无"
+    quality_refs = "\n".join(f"- {item}" for item in triage.get("report_quality_evidence_refs") or []) or "- 无"
+    quality_gaps = "\n".join(
+        f"- {item.get('field') or 'unspecified'}: {item.get('reason') or item.get('question') or ''}"
+        if isinstance(item, dict)
+        else f"- {item}"
+        for item in triage.get("report_quality_missing_fields") or []
+    ) or "- 无"
+    quality_conflicts = "\n".join(
+        (
+            f"- {item.get('topic') or 'unspecified'}: {item.get('reason') or item.get('question') or ''}"
+            f"；来源: {', '.join(text_list(item.get('sources') or item.get('source_refs'))) or '未记录'}"
+        )
+        if isinstance(item, dict)
+        else f"- {item}"
+        for item in triage.get("report_quality_conflicts") or []
+    ) or "- 无"
+    quality_questions = "\n".join(
+        f"- {item}" for item in triage.get("report_quality_questions") or []
+    ) or "- 无"
+    feedback_targets = ", ".join(triage.get("feedback_targets") or []) or "未指定"
+    feedback_draft = triage.get("feedback_draft") or "无"
     return f"""# 分诊报告
 
 ## 工单
@@ -902,6 +1319,40 @@ def render_triage(issue: dict[str, Any], match: dict[str, Any], triage: dict[str
 ### 关键证据
 
 {findings}
+
+## 工单信息完整度
+
+- 状态: {triage.get('report_quality_status') or 'unknown'}
+- 足以实施与验收: {str(bool(triage.get('report_quality_complete'))).lower()}
+- 评估时间: {triage.get('report_quality_assessed_at') or '未记录'}
+- 绑定当前证据快照: {str(bool(triage.get('report_quality_assessment_current'))).lower()}
+
+### 已确认事实
+
+{quality_facts}
+
+### 证据来源
+
+{quality_refs}
+
+### 缺失项
+
+{quality_gaps}
+
+### 冲突项
+
+{quality_conflicts}
+
+### 精确确认问题
+
+{quality_questions}
+
+### 反馈草稿
+
+- 反馈对象: {feedback_targets}
+- 发布状态: {triage.get('feedback_publish_status') or 'blocked-by-assessment'}
+
+{feedback_draft}
 
 ## 理由
 
@@ -976,6 +1427,11 @@ def triage_issue_dir(config: dict[str, Any], issue_root: Path) -> dict[str, Any]
             "risk": triage["risk"],
             "evidence_status": triage["evidence_status"],
             "evidence_complete": triage["evidence_complete"],
+            "report_quality_status": triage["report_quality_status"],
+            "report_quality_complete": triage["report_quality_complete"],
+            "report_quality_input_hash": triage["report_quality_input_hash"],
+            "report_quality_assessment_current": triage["report_quality_assessment_current"],
+            "triage_policy_version": REPORT_QUALITY_POLICY_VERSION,
         },
     )
     return {
@@ -997,6 +1453,27 @@ def triage_issue_dir(config: dict[str, Any], issue_root: Path) -> dict[str, Any]
         "evidence_status": triage["evidence_status"],
         "evidence_complete": triage["evidence_complete"],
         "evidence_findings": triage["evidence_findings"],
+        "report_quality_status": triage["report_quality_status"],
+        "report_quality_complete": triage["report_quality_complete"],
+        "report_quality_assessed_at": triage["report_quality_assessed_at"],
+        "report_quality_input_hash": triage["report_quality_input_hash"],
+        "report_quality_expected_input_hash": triage["report_quality_expected_input_hash"],
+        "report_quality_assessment_current": triage["report_quality_assessment_current"],
+        "report_quality_facts": triage["report_quality_facts"],
+        "report_quality_evidence_refs": triage["report_quality_evidence_refs"],
+        "report_quality_missing_fields": triage["report_quality_missing_fields"],
+        "report_quality_conflicts": triage["report_quality_conflicts"],
+        "questions": list(
+            dict.fromkeys(
+                [
+                    *([match.get("customer_confirmation_question")] if match.get("customer_confirmation_question") else []),
+                    *triage["report_quality_questions"],
+                ]
+            )
+        ),
+        "feedback_targets": triage["feedback_targets"],
+        "feedback_draft": triage["feedback_draft"],
+        "feedback_publish_status": triage["feedback_publish_status"],
         "confirmation_required": match["confirmation_required"],
         "question": match.get("customer_confirmation_question") or "",
     }
@@ -1016,17 +1493,322 @@ def triage(args: argparse.Namespace) -> int:
     return 0
 
 
+def preview_report_quality(issue: dict[str, Any]) -> tuple[str, list[str]]:
+    quality = issue.get("report_quality") or {}
+    if not isinstance(quality, dict):
+        quality = {}
+    aliases = {
+        "complete": "sufficient",
+        "ready": "sufficient",
+        "incomplete": "needs-clarification",
+        "clarification-required": "needs-clarification",
+        "needs-confirmation": "needs-clarification",
+        "needs_confirmation": "needs-clarification",
+        "conflict": "conflicting",
+    }
+    status = str(quality.get("status") or "unknown").strip().lower()
+    status = aliases.get(status, status)
+    missing_fields = quality.get("missing_fields") or quality.get("blocking_gaps") or []
+    conflicts = quality.get("conflicts") or []
+    if conflicts:
+        status = "conflicting"
+    elif missing_fields:
+        status = "needs-clarification"
+    if status not in {"sufficient", "needs-clarification", "conflicting", "unknown"}:
+        status = "unknown"
+
+    hints: list[str] = []
+    for item in missing_fields if isinstance(missing_fields, list) else [missing_fields]:
+        if isinstance(item, dict):
+            hint = item.get("reason") or item.get("question") or item.get("field")
+        else:
+            hint = item
+        if str(hint or "").strip():
+            hints.append(str(hint).strip())
+    for item in conflicts if isinstance(conflicts, list) else [conflicts]:
+        if isinstance(item, dict):
+            sources = text_list(item.get("sources") or item.get("source_refs"))
+            hint = f"{item.get('topic') or '验收口径'}存在冲突"
+            if sources:
+                hint += f"（{', '.join(sources)}）"
+        else:
+            hint = str(item)
+        if hint:
+            hints.append(hint)
+
+    if status == "unknown":
+        has_narrative = bool(
+            str(issue.get("description") or "").strip()
+            or issue.get("comments")
+            or (issue.get("evidence_fetch") or {}).get("findings")
+        )
+        hints.append(
+            "已有描述，进入 fix-ready 后核对复现、实际、期望与验收口径"
+            if has_narrative
+            else "缺少可用问题描述，进入 fix-ready 前需补充"
+        )
+    preview_status = {
+        "sufficient": "appears-complete",
+        "needs-clarification": "suspected-gaps",
+        "conflicting": "suspected-conflict",
+        "unknown": "not-assessed",
+    }[status]
+    return preview_status, list(dict.fromkeys(hints))
+
+
+def preview_recommendation(item: dict[str, Any]) -> str:
+    if item["ownership"] in {"backend-owned", "not-current-repo"}:
+        return "建议转交；确认后不在当前仓库兜底"
+    if item["readiness_hint"] == "needs-ownership-check":
+        return "先确认需求/仓库，再进入 fix-ready"
+    if item["readiness_hint"] == "likely-low-risk":
+        return (
+            "可优先进入 fix-ready；先确认仓库归属"
+            if item.get("repository_match") != "current-repo"
+            else "可优先进入 fix-ready"
+        )
+    return "选中后进入 fix-ready 详细评审"
+
+
+def preview_priority_rank(value: Any) -> int:
+    normalized = str(value or "").strip().casefold()
+    ranks = {
+        "p0": 0,
+        "urgent": 0,
+        "紧急": 0,
+        "p1": 1,
+        "high": 1,
+        "高": 1,
+        "p2": 2,
+        "medium": 2,
+        "中": 2,
+        "p3": 3,
+        "low": 3,
+        "低": 3,
+        "p4": 4,
+    }
+    return ranks.get(normalized, 9)
+
+
+def render_preview_markdown(items: list[dict[str, Any]], filter_summary: dict[str, Any]) -> str:
+    quality_labels = {
+        "appears-complete": "描述看起来较完整（待复核）",
+        "suspected-gaps": "疑似待补充",
+        "suspected-conflict": "发现口径冲突",
+        "not-assessed": "未做正式评估",
+    }
+    risk_labels = {"low": "低", "medium": "中", "high": "高"}
+    rows = [
+        [
+            str(item.get("preview_order") or ""),
+            "<br>".join(str(part) for part in (item.get("id"), item.get("issue")) if part),
+            item.get("title") or "",
+            item.get("priority") or "",
+            item.get("status") or "",
+            item.get("assignee") or "",
+            triage_display_label(item.get("ownership") or ""),
+            risk_labels.get(item.get("risk_hint"), "待判断"),
+            quality_labels.get(item.get("preview_report_quality"), "未做正式评估"),
+            item.get("recommendation") or "",
+        ]
+        for item in items
+    ]
+    table = markdown_table(
+        ["顺序", "缺陷", "标题", "优先级", "状态", "负责人", "初步归属", "初步风险", "工单信息", "建议"],
+        rows,
+    ) if rows else "无"
+    hints = "\n".join(
+        f"- {item['issue']}: {'；'.join(item.get('information_hints') or [])}"
+        for item in items
+        if item.get("information_hints")
+    ) or "无"
+    scope_label = (
+        "显式要求纳入的候选工单"
+        if filter_summary.get("mode") == "explicit-all-assignees"
+        else "指派给当前用户的候选工单"
+    )
+    return f"""# Bug 快速扫描
+
+本次仅做 preview/scan：纳入 {len(items)} 个{scope_label}。结论均为初步判断；未生成每工单完整工件、未计算正式信息质量哈希、未修改代码/状态、未提交。
+
+## 扫描结果
+
+{table}
+
+## 进入 fix-ready 后需核对
+
+{hints}
+
+## 负责人过滤
+
+- 模式: {filter_summary.get('mode') or ''}
+- 输入: {filter_summary.get('input_count') or 0}
+- 纳入: {filter_summary.get('included_count') or 0}
+- 跳过其他负责人: {filter_summary.get('skipped_assignee_count') or 0}
+"""
+
+
+def preview(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    platform = config_value(config, "issue_source.platform", args.platform)
+    payload = load_json_payload(args.input)
+    normalized = [
+        normalize_issue(item, platform, field_mapping(config), retain_raw=False, include_raw=False)
+        for item in iter_payload_items(payload)
+    ]
+    assignee_tokens, filter_mode = import_assignee_filter(config, args, str(platform))
+    included, filter_summary = filter_imported_issues(normalized, assignee_tokens, filter_mode)
+    items: list[dict[str, Any]] = []
+    for issue in included:
+        match = match_requirement(config, issue)
+        triage = classify_issue(config, issue, match, enforce_readiness_gates=False)
+        preview_text = combined_text(issue)
+        backend_reason = backend_owned_reason(config, preview_text)
+        low_risk_words = (
+            "样式",
+            "布局",
+            "间距",
+            "对齐",
+            "颜色",
+            "字号",
+            "溢出",
+            "遮挡",
+            "图标",
+            "css",
+            "style",
+            "layout",
+            "overflow",
+            "align",
+        )
+        high_risk_words = (
+            "权限",
+            "认证",
+            "接口",
+            "api",
+            "数据库",
+            "支付",
+            "数据丢失",
+            "删除",
+            "保存失败",
+            "安全",
+            "后端",
+        )
+        if match["repository_match"] != "other-repo" and backend_reason:
+            triage.update(
+                ownership="backend-owned",
+                effort="blocked",
+                risk="low",
+                readiness="redirect-to-owner",
+            )
+        elif (
+            match["repository_match"] != "other-repo"
+            and config_value(config, "project.role_assumption", "") == "frontend"
+            and any(word in preview_text for word in low_risk_words)
+            and not any(word in preview_text for word in high_risk_words)
+        ):
+            triage.update(
+                ownership="frontend-owned",
+                effort="easy",
+                risk="low",
+                readiness="auto-fix-candidate",
+            )
+        quality_status, information_hints = preview_report_quality(issue)
+        item = {
+            "issue": issue.get("number") or issue.get("id"),
+            "id": issue.get("id") or "",
+            "title": issue.get("title") or "",
+            "priority": display_scalar(issue.get("priority")),
+            "status": display_scalar(issue.get("status")),
+            "assignee": issue_people(issue, "assignee"),
+            "repository_match": match["repository_match"],
+            "ownership": triage["ownership"],
+            "effort_hint": triage["effort"],
+            "risk_hint": triage["risk"],
+            "readiness_hint": {
+                "auto-fix-candidate": "likely-low-risk",
+                "manual-review-first": "needs-fix-ready-review",
+                "ask-for-confirmation": "needs-ownership-check",
+                "redirect-to-owner": "redirect-candidate",
+            }.get(triage["readiness"], "needs-fix-ready-review"),
+            "preview_report_quality": quality_status,
+            "information_hints": information_hints,
+            "provisional": True,
+            "repair_allowed": False,
+            "next_step": "fix-ready",
+        }
+        item["recommendation"] = preview_recommendation(item)
+        items.append(item)
+
+    risk_ranks = {"high": 0, "medium": 1, "low": 2}
+    items.sort(
+        key=lambda item: (
+            preview_priority_rank(item.get("priority")),
+            risk_ranks.get(str(item.get("risk_hint") or ""), 9),
+            str(item.get("issue") or ""),
+        )
+    )
+    for index, item in enumerate(items, start=1):
+        item["preview_order"] = index
+
+    report = render_preview_markdown(items, filter_summary)
+    if args.report:
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(report, encoding="utf-8")
+    if args.json:
+        print(
+            json.dumps(
+                {"mode": "preview", "count": len(items), "items": items, "assignee_filter": filter_summary},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    else:
+        print(report)
+    return 0
+
+
+def report_quality_hash_command(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    target = issue_dir(root, args.issue)
+    issue = load_issue(target)
+    print(
+        json.dumps(
+            {
+                "issue": issue.get("number") or issue.get("id"),
+                "input_hash": report_quality_input_hash(issue),
+                "instruction": "Bind the semantic assessment to this exact hash in report_quality.input_hash.",
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+    return 0
+
+
 def render_daily_markdown(results: list[dict[str, Any]]) -> str:
     auto = [item for item in results if item["readiness"] == "auto-fix-candidate"]
     manual = [item for item in results if item["readiness"] == "manual-review-first"]
     needs = [item for item in results if item["confirmation_required"] or item["readiness"] == "ask-for-confirmation"]
     redirects = [item for item in results if item["readiness"] == "redirect-to-owner"]
+    report_clarifications = [item for item in results if item.get("report_quality_complete") is not True]
+
+    quality_labels = {
+        "sufficient": "完整",
+        "needs-clarification": "待补充",
+        "conflicting": "有冲突",
+        "unknown": "未评估",
+    }
+
+    def quality_label(item: dict[str, Any]) -> str:
+        return quality_labels.get(str(item.get("report_quality_status") or "unknown"), "未评估")
 
     def table(items: list[dict[str, Any]]) -> str:
         if not items:
             return "无"
         return markdown_table(
-            ["缺陷", "标题", "优先级", "状态", "提出/更新", "报告人/负责人", "证据", "推荐"],
+            ["缺陷", "标题", "优先级", "状态", "提出/更新", "报告人/负责人", "证据", "工单信息", "推荐"],
             [
                 [
                     "<br>".join(str(part) for part in (item.get("id"), item.get("issue")) if part),
@@ -1036,22 +1818,60 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
                     item.get("date") or "",
                     " / ".join(part for part in (item.get("reporter"), item.get("assignee")) if part),
                     "完整" if item.get("evidence_complete") else "不完整",
+                    quality_label(item),
                     recommendation_label(item["readiness"], item["effort"], item["risk"]),
                 ]
                 for item in items
             ],
         )
 
-    questions = "\n".join(f"- {item['issue']}: {item['question']}" for item in needs if item.get("question")) or "无"
+    questions = "\n".join(
+        f"- {item['issue']}: {question}"
+        for item in needs
+        for question in item.get("questions") or ([item["question"]] if item.get("question") else [])
+    ) or "无"
+
+    clarification_blocks: list[str] = []
+    for item in report_clarifications:
+        gaps = [
+            entry.get("reason") or entry.get("question") or entry.get("field") or "未说明"
+            if isinstance(entry, dict)
+            else str(entry)
+            for entry in item.get("report_quality_missing_fields") or []
+        ]
+        conflicts = [
+            (
+                f"{entry.get('reason') or entry.get('question') or entry.get('topic') or '未说明'}"
+                f"（来源：{', '.join(text_list(entry.get('sources') or entry.get('source_refs'))) or '未记录'}）"
+            )
+            if isinstance(entry, dict)
+            else str(entry)
+            for entry in item.get("report_quality_conflicts") or []
+        ]
+        detail_lines = [
+            f"### {item['issue']} {item.get('title') or ''}",
+            "",
+            f"- 信息状态: {quality_label(item)}",
+            f"- 已确认事实: {'；'.join(item.get('report_quality_facts') or []) or '无'}",
+            f"- 依据: {'；'.join(item.get('report_quality_evidence_refs') or []) or '未记录'}",
+            f"- 缺失/冲突: {'；'.join([*gaps, *conflicts]) or '尚未完成信息完整度评估'}",
+            f"- 反馈对象: {', '.join(item.get('feedback_targets') or []) or '待判断'}",
+            f"- 发布状态: {item.get('feedback_publish_status') or 'blocked-by-assessment'}",
+            "",
+            item.get("feedback_draft") or "尚未生成反馈草稿。",
+        ]
+        clarification_blocks.append("\n".join(detail_lines))
+    clarification_drafts = "\n\n".join(clarification_blocks) or "无"
     summary_parts = [
         f"本次查询到 {len(results)} 个缺陷",
         f"安全候选 {len(auto)} 个",
         f"需人工评审 {len(manual)} 个",
         f"需确认 {len(needs)} 个",
+        f"工单信息待补充/确认 {len(report_clarifications)} 个",
         f"建议转交 {len(redirects)} 个",
     ]
     evidence = "；".join(
-        f"{item['issue']}：证据{'完整' if item.get('evidence_complete') else '不完整'} / "
+        f"{item['issue']}：证据{'完整' if item.get('evidence_complete') else '不完整'} / 工单信息{quality_label(item)} / "
         f"{triage_display_label(item['repository_match'])} / {triage_display_label(item['ownership'])} / "
         f"{triage_display_label(item['readiness'])}"
         for item in results
@@ -1087,6 +1907,10 @@ def render_daily_markdown(results: list[dict[str, Any]]) -> str:
 ## 确认问题
 
 {questions}
+
+## 工单描述待补充
+
+{clarification_drafts}
 """
 
 
@@ -1109,6 +1933,79 @@ def daily(args: argparse.Namespace) -> int:
     return 0
 
 
+def daily_existing(args: argparse.Namespace) -> int:
+    config = load_config(Path(args.config), Path(args.local_config) if args.local_config else None)
+    root = Path(config_value(config, "bugflow.root", args.root))
+    issue_keys = list(dict.fromkeys(str(key) for key in args.issue))
+    targets = [issue_dir(root, key) for key in issue_keys]
+    missing = [str(target) for target in targets if not (target / "issue.json").exists()]
+    if missing:
+        raise SystemExit(f"Missing current issue artifact(s): {', '.join(missing)}")
+    loaded = [load_issue(target) for target in targets]
+    identity_mismatches = [
+        f"{target} declares {issue_key(issue)}"
+        for target, issue in zip(targets, loaded)
+        if issue_dir(root, issue_key(issue)).resolve() != target.resolve()
+    ]
+    if identity_mismatches:
+        raise SystemExit(
+            "Stored issue identity does not match the explicitly selected directory: "
+            + "; ".join(identity_mismatches)
+        )
+    if bool(getattr(args, "include_all_assignees", False)):
+        assignee_tokens: set[str] = set()
+        filter_mode = "explicit-all-assignees"
+    else:
+        raw_cli_assignees = getattr(args, "assignee", None) or []
+        if isinstance(raw_cli_assignees, str):
+            raw_cli_assignees = [raw_cli_assignees]
+        configured_assignee = str(config_value(config, "query_policy.assigned_to", "") or "")
+        configured_aliases = config_value(config, "query_policy.assignee_aliases", []) or []
+        if not isinstance(configured_aliases, list):
+            raise SystemExit("query_policy.assignee_aliases must be a list of current-user names or ids.")
+        candidates = raw_cli_assignees or [configured_assignee, *configured_aliases]
+        assignee_tokens = {
+            identity_token(value)
+            for value in candidates
+            if identity_token(value) and identity_token(value) != identity_token(CURRENT_LOGIN_USER)
+        }
+        if not assignee_tokens:
+            raise SystemExit(
+                "daily-existing cannot trust current_login_user() for already stored artifacts. "
+                "Pass --assignee <current-user-name-or-id>, configure a concrete assignee alias, "
+                "or explicitly pass --include-all-assignees."
+            )
+        filter_mode = "matched-existing-current-assignee"
+
+    filtered_pairs = [
+        (target, issue)
+        for target, issue in zip(targets, loaded)
+        if not assignee_tokens or person_identity_tokens(issue.get("assignee")) & assignee_tokens
+    ]
+    filtered_targets = [target for target, _issue in filtered_pairs]
+    filter_summary = {
+        "mode": filter_mode,
+        "input_count": len(loaded),
+        "included_count": len(filtered_pairs),
+        "skipped_assignee_count": len(loaded) - len(filtered_pairs),
+        "assignees": sorted(assignee_tokens),
+    }
+    results = [triage_issue_dir(config, target) for target in filtered_targets]
+    report = render_daily_markdown(results)
+    report += (
+        "\n\n## 输入范围\n\n"
+        f"- 模式: existing-current-run / {filter_summary['mode']}\n"
+        f"- 显式工单数: {len(targets)}\n"
+        f"- 纳入当前负责人: {len(filtered_targets)}\n"
+        f"- 跳过其他负责人: {filter_summary['skipped_assignee_count']}\n"
+        "- 说明: 仅使用命令显式列出的当前 issue.json，未扫描历史目录。\n"
+    )
+    if args.report:
+        Path(args.report).write_text(report, encoding="utf-8")
+    print(report)
+    return 0
+
+
 def effort_rank(effort: str) -> int:
     return {"easy": 1, "medium": 2, "hard": 3, "blocked": 99}.get(effort, 99)
 
@@ -1122,6 +2019,11 @@ def hard_repair_blockers(item: dict[str, Any]) -> list[str]:
 
     if item.get("evidence_complete") is not True:
         blockers.append("Inbound detail/comments/attachment evidence is incomplete; approval cannot bypass evidence intake.")
+    if item.get("report_quality_complete") is not True:
+        blockers.append(
+            "Issue reproduction, actual/expected behavior, or acceptance criteria are not sufficiently clear; "
+            "approval cannot bypass the report-quality gate."
+        )
 
     if repository_match != "current-repo":
         blockers.append(f"Repository match is {repository_match or 'unknown'}; only the current repo can be repaired.")
@@ -1180,6 +2082,10 @@ def fix_plan_fingerprint(issue: dict[str, Any], item: dict[str, Any], args: argp
         "readiness": item.get("readiness"),
         "effort": item.get("effort"),
         "risk": item.get("risk"),
+        "report_quality_status": item.get("report_quality_status"),
+        "report_quality_complete": item.get("report_quality_complete"),
+        "report_quality_questions": item.get("report_quality_questions") or item.get("questions") or [],
+        "triage_policy_version": REPORT_QUALITY_POLICY_VERSION,
         "files": sorted(str(file) for file in (args.files or [])),
         "route": args.route or "",
         "notes": args.notes or "",
@@ -1585,6 +2491,17 @@ def lightweight_verification_blockers(
 
     if artifact_effective_status(target, "triage-report") != "done":
         blockers.append("Triage is not current and complete.")
+        issue = load_issue(target)
+        if not issue_evidence_state(issue)["complete"]:
+            blockers.append("Inbound evidence is incomplete; lightweight verification is not permitted.")
+        quality_state = issue_report_quality_state(issue)
+        if not quality_state["complete"]:
+            blockers.append(
+                f"Report-quality is {quality_state['status']} or stale; lightweight verification is not permitted."
+            )
+        triage_metadata = frontmatter_metadata(artifact_path(target, "triage-report"))
+        if triage_metadata.get("triage_policy_version") != REPORT_QUALITY_POLICY_VERSION:
+            blockers.append("Triage uses an older report-quality policy and must be regenerated.")
         return blockers
     triage_metadata = frontmatter_metadata(artifact_path(target, "triage-report"))
     if triage_metadata.get("repository_match") != "current-repo":
@@ -1603,6 +2520,8 @@ def lightweight_verification_blockers(
         blockers.append("The triage recommendation does not permit repair.")
     if triage_metadata.get("evidence_complete") != "true":
         blockers.append("Inbound evidence is incomplete; lightweight verification is not permitted.")
+    if triage_metadata.get("report_quality_complete") != "true":
+        blockers.append("Issue information is not sufficient for implementation and acceptance; lightweight verification is not permitted.")
     return blockers
 
 
@@ -2349,9 +3268,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     fetch_parser.set_defaults(func=fetch_json)
 
+    preview_parser = subparsers.add_parser(
+        "preview",
+        aliases=["scan"],
+        help="Quick assigned-issue triage without writing per-issue artifacts or requiring report-quality hashes.",
+    )
+    preview_parser.add_argument("--input", help="Raw or normalized issue JSON file. Reads stdin when omitted.")
+    preview_parser.add_argument("--platform", default="feishu-project")
+    preview_parser.add_argument(
+        "--assignee",
+        action="append",
+        help="Current-user assignee name/id for exported JSON. Repeat for aliases.",
+    )
+    preview_parser.add_argument(
+        "--include-all-assignees",
+        action="store_true",
+        help="Explicitly preview issues assigned to other users as well.",
+    )
+    preview_parser.add_argument("--report", help="Optional markdown preview output path.")
+    preview_parser.add_argument("--json", action="store_true", help="Print machine-readable preview results.")
+    preview_parser.set_defaults(func=preview)
+
     triage_parser = subparsers.add_parser("triage", help="Generate requirement-match and triage artifacts.")
     triage_parser.add_argument("--issue", help="Issue number/id. Defaults to all issue directories.")
     triage_parser.set_defaults(func=triage)
+
+    quality_hash_parser = subparsers.add_parser(
+        "report-quality-hash",
+        help="Print the current evidence snapshot hash for a report_quality assessment.",
+    )
+    quality_hash_parser.add_argument("--issue", required=True, help="Issue number/id.")
+    quality_hash_parser.set_defaults(func=report_quality_hash_command)
 
     plan_parser = subparsers.add_parser("plan-fix", help="Create a controlled fix plan for one issue.")
     plan_parser.add_argument("--issue", required=True, help="Issue number/id.")
@@ -2464,6 +3411,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     daily_parser.add_argument("--report", help="Optional markdown report output path.")
     daily_parser.set_defaults(func=daily)
+
+    daily_existing_parser = subparsers.add_parser(
+        "daily-existing",
+        help="Triage explicitly listed current issue artifacts and render a report without re-importing JSON.",
+    )
+    daily_existing_parser.add_argument(
+        "--issue",
+        action="append",
+        required=True,
+        help="Current-run issue number/id. Repeat for each issue; historical directories are never auto-scanned.",
+    )
+    daily_existing_parser.add_argument("--report", help="Optional markdown report output path.")
+    daily_existing_parser.add_argument(
+        "--assignee",
+        action="append",
+        help="Current-user assignee name/id. Repeat for aliases when native current-user identity is unavailable.",
+    )
+    daily_existing_parser.add_argument(
+        "--include-all-assignees",
+        action="store_true",
+        help="Explicitly include listed artifacts assigned to other users.",
+    )
+    daily_existing_parser.set_defaults(func=daily_existing)
 
     mql_parser = subparsers.add_parser("feishu-mql", help="Print a minimal Feishu Project MQL query from config.")
     mql_parser.add_argument("--json", action="store_true", help="Print machine-readable query metadata.")

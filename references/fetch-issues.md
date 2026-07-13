@@ -2,11 +2,23 @@
 
 Use this reference when retrieving issues from a tracker or from an exported JSON file.
 
+## Contents
+
+- [Goals](#goals)
+- [Access Order](#access-order)
+- [Query Policy](#query-policy)
+- [Standard Issue Shape](#standard-issue-shape)
+- [Raw Payload Policy](#raw-payload-policy)
+- [Detail Fetching](#detail-fetching)
+- [Output](#output)
+
 ## Goals
 
-- Fetch only actionable issues first.
-- Retrieve enough detail for triage: title, description, reproduction steps, expected result, actual result, priority, assignee, status, update time, requirement links, inbound comments, relevant activity records, and the inspected content of screenshots/recordings/attachments.
+- Fetch only actionable issues first and filter to the current assignee by default.
+- For preview/scan, retrieve only list fields, available summaries, and any cheap key evidence needed for provisional ownership/risk/priority/ranking; run `bugflow_runner.py preview` without per-issue artifacts or strict gates.
+- For a user-selected fix-ready issue, retrieve enough detail for final triage: title, description, reproduction steps/trigger conditions, expected and actual results, acceptance criteria, priority, assignee, status, update time, requirement links, all relevant inbound comments/activities, and the inspected content of decision-relevant screenshots/recordings/attachments. Retrieve environment, account role, and safe test data only when behavior depends on them.
 - Normalize all sources to a shared JSON shape before classification.
+- Assess `report_quality` only in fix-ready from all normalized evidence; do not equate successful retrieval with sufficient implementation/acceptance detail.
 
 ## Access Order
 
@@ -63,6 +75,13 @@ Normalize each issue to:
   "priority": "P1",
   "assignee": "current_user",
   "description": "Full issue description",
+  "reproduction_steps": "Open the saved draft, then reopen it from the list.",
+  "actual_result": "The first video frame is blank.",
+  "expected_result": "The first video frame remains visible.",
+  "environment": "Test environment, Chrome 126",
+  "test_data": "Draft BUG-88; no credentials or secrets",
+  "acceptance_criteria": "The first frame is visible after save and reopen.",
+  "implementation_suggestion": "Optional reporter suggestion; not an acceptance requirement",
   "requirements": [
     {
       "id": "REQ-1",
@@ -82,6 +101,18 @@ Normalize each issue to:
     "fetched_at": "2026-07-07T10:05:00+08:00",
     "findings": [],
     "missing": []
+  },
+  "report_quality": {
+    "status": "sufficient",
+    "assessed_at": "2026-07-07T10:10:00+08:00",
+    "input_hash": "<hash from report-quality-hash>",
+    "facts": ["The inspected recording and comment define trigger, actual, and expected results."],
+    "evidence_refs": ["attachment repro.mp4@00:08", "comment comment-7"],
+    "missing_fields": [],
+    "conflicts": [],
+    "questions": [],
+    "feedback_targets": [],
+    "feedback_draft": ""
   },
   "updated_at": "2026-07-07T10:00:00+08:00",
   "raw": {}
@@ -104,9 +135,15 @@ Do not classify an issue as easy only from a short title, filename, thumbnail, o
 
 When any decision-relevant source is unavailable, preserve the metadata that is safe to keep, set `evidence_fetch.status` to `partial|error`, add the exact reason to `missing`, and block high-confidence/fix-plan decisions. Reading inbound comments is read-only; posting a comment is governed separately by completion-action authorization.
 
+After the evidence gate, follow `report-quality.md`. A sparse description may become sufficient through inspected video, comments, activities, or an authoritative PRD. Conversely, fully fetched sources may still be missing expected behavior, trigger conditions, or acceptance criteria. Set `report_quality` to `needs-clarification`, `conflicting`, or `unknown`, generate exact questions and a local feedback draft, and block repair planning until it becomes `sufficient`.
+
+Do not require a proposed code change from the tester. Keep an incorrect implementation suggestion separate from the observable goal; route the repair to the correct owner when the goal itself is clear. Never normalize passwords, tokens, private account credentials, or secret-bearing test data.
+
 ## Output
 
-Return a compact issue list with:
+Preview returns a compact provisional list with id/number, title, status, priority, assignee, updated time, provisional ownership/risk, recommendation, current basis, and suspected gaps. Do not attach strict evidence/report-quality states or feedback drafts.
+
+Fix-ready returns the selected issue with:
 
 - id/number
 - title
@@ -116,4 +153,5 @@ Return a compact issue list with:
 - updated time
 - whether full detail was retrieved
 - evidence completeness and whether attachment contents were actually inspected
-- any missing fields that affect triage
+- report-quality status, confirmed facts, conflicts, and any missing fields that affect implementation or acceptance
+- exact clarification questions, feedback target, and the local unpublished feedback draft when needed
