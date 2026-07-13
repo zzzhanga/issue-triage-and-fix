@@ -2,6 +2,20 @@
 
 Use this reference when `issue_source.platform` is `feishu-project` or the user provides a `project.feishu.cn` URL.
 
+## Contents
+
+- [URL Parsing](#url-parsing)
+- [Access Order](#access-order)
+- [Field Discovery](#field-discovery)
+- [Common Feishu Fields](#common-feishu-fields)
+- [Generate MQL From Config](#generate-mql-from-config)
+- [Default MQL Shape](#default-mql-shape)
+- [Inbound Evidence](#inbound-evidence)
+- [Requirement Links](#requirement-links)
+- [Common Status Labels](#common-status-labels)
+- [Status Updates](#status-updates)
+- [Comments](#comments)
+
 ## URL Parsing
 
 Parse URLs such as:
@@ -102,6 +116,20 @@ Replace `PROJECT_KEY`, `WORK_ITEM_TYPE`, field names, status values, and limit f
 
 Add the configured requirement/demand field to the SELECT list when available. If the list query omits linked requirements, fetch the full work item before repository matching.
 
+## Inbound Evidence
+
+The MQL list is only the candidate index. Before final triage of each candidate, follow `evidence-intake.md` and use the configured Feishu Project MCP tools when available:
+
+1. Fetch full detail with `get_workitem_brief` (or the server's equivalent) instead of relying on the list row.
+2. Page through `list_workitem_comments` until complete. Preserve sanitized comment ids, authors, times, text, and attachment references.
+3. Read relevant `get_workitem_op_record` pages/time windows when status changes, reopening, reassignment, field changes, or newly added evidence may affect the current expectation.
+4. Collect attachment/file references from the configured attachment field, description/rich text, and comments.
+5. Resolve files with `get_download_url` or the equivalent tool, use the returned sign/header only for the immediate download request, and inspect the downloaded local file. Never put the sign, temporary URL, authorization header, or MCP URL into `issue.json`.
+
+Tool names and pagination limits can vary by MCP version. Honor the tool schema returned by the active server. If comments, operation records, or downloads are unavailable, record that source as `partial|error`; do not convert “tool missing” into an empty list or a high-confidence conclusion.
+
+For images, inspect the actual resolution. For recordings, inspect representative frames/segments around the demonstrated failure and audio/transcript when relevant. A cover frame or thumbnail alone is not reviewed evidence.
+
 ## Requirement Links
 
 Many Feishu Project bug lists show a linked requirement/demand column. Fetch it as a structured field when possible, not only as display text.
@@ -138,21 +166,26 @@ Resolve every status id from Feishu field config before status updates. Labels a
 
 ## Status Updates
 
+The Feishu starter enables `update_status_allowed`, `start_fix`, and `resolve_for_acceptance` as normal repair capabilities. These defaults do not authorize or automatically execute an update.
+
 Before changing status:
 
 - Read `status-workflow.md`.
+- Require `completion_action_authorized(issue, exact_transition)`; the transition must be listed in the approved fix plan.
 - Confirm the target status id from config or field schema.
 - Confirm the transition is allowed by project policy.
 - Include the issue id, old status, new status, and reason in the operation summary.
 
 Default safe behavior:
 
-- Moving `待修复` to `修复中`: allowed only when config enables `start_fix` and the target status id is known.
-- Moving to `已解决，待验收`, `已完成`, or `已终止`: require config permission or user approval.
+- Moving `待修复` to `修复中`: require plan action `start-fix`, effective project/local permission, an enabled transition, and a verified target status id.
+- Moving to `已解决，待验收`, `已完成`, or `已终止`: require the matching plan action and satisfy verification/acceptance prerequisites. Several actions may share one exact plan approval.
 
 ## Comments
 
-When remote comments are allowed, include:
+Reading existing comments is mandatory read-only evidence intake before final triage and does not require completion-action authorization. Fetch all pages, order comments stably by time/id, and include only sanitized, decision-relevant text and attachment summaries in the normalized issue.
+
+Posting a new comment is a different remote action. Only when `completion_action_authorized(issue, comment)` is true, include:
 
 - what changed
 - verification commands

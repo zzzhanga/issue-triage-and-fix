@@ -1,4 +1,4 @@
 interface:
-  display_name: "Issue Triage And Fix"
-  short_description: "Initialize bugflow config, triage issues, run controlled fix-one, verify, and commit."
-  default_prompt: "Use $issue-triage-and-fix to initialize bugflow config if needed, fetch my assigned bugs, map requirements to repos, triage them, auto-fix low-risk frontend candidates when allowed, verify, create a local commit, and record closure artifacts."
+  display_name: "缺陷分诊与修复"
+  short_description: "读取评论与媒体证据后分诊指派缺陷，并受控修复闭环"
+  default_prompt: "使用 $issue-triage-and-fix 只拉取分配给我的工单，先读取完整详情、历史评论并检查图片/视频附件，再判断归属和风险；批准具体计划后按标准或轻量验证完成计划内提交与飞书状态流转。"

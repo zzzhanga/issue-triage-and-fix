@@ -9,9 +9,11 @@ project:
     - README.md
 
 issue_source:
-  platform: feishu-project
-  base_url: https://project.feishu.cn
-  project_key: example-key
+  # Feishu Project has a native adapter. For every other tracker, export JSON
+  # first and import it with fetch-json/daily.
+  platform: exported-json
+  base_url: ""
+  project_key: ""
   work_item_type: issue
   default_status: OPEN
 
@@ -59,7 +61,9 @@ bugflow:
   commit_artifacts_by_default: false
 
 query_policy:
-  assigned_to: current_login_user()
+  # Required before fetch-json/daily. Use the current user's tracker name or id.
+  assigned_to: ""
+  assignee_aliases: []
   status: OPEN
   limit: 20
   order_by: updated_at desc
@@ -83,6 +87,12 @@ ownership_rules:
     - permission configuration
     - infrastructure
     - another client application
+  backend_owned:
+    - 列表接口排序
+    - 接口返回顺序
+    - 后端查询排序
+    - 数据库排序
+    - API contract
 
 verification:
   package_manager: pnpm
@@ -99,6 +109,10 @@ browser_verification:
   enabled: true
   dev_command: pnpm run dev
   app_url: http://localhost:5173
+  surface_priority:
+    - existing_chrome_tab
+    - existing_in_app_browser_tab
+    - new_in_app_browser_tab
   required_for:
     - style
     - table
@@ -112,7 +126,8 @@ browser_verification:
 
 login_policy:
   method_priority:
-    - existing_browser_session
+    - existing_chrome_session
+    - existing_in_app_browser_session
     - manual_user_login
     - env_test_account
     - mock_token
@@ -123,6 +138,7 @@ login_policy:
     password: PROJECT_TEST_PASSWORD
 
 remote_status_policy:
+  # Exported JSON has no native remote adapter, so remote actions remain disabled.
   update_status_allowed: false
   update_comments_allowed: false
   default_change_to_in_progress: false
@@ -154,7 +170,7 @@ status_transitions:
   start_fix:
     from: open
     to: in_progress
-    require_confirmation: false
+    require_confirmation: true
   resolve_for_acceptance:
     from: in_progress
     to: resolved_waiting_acceptance
@@ -172,8 +188,13 @@ status_transitions:
     require_confirmation: true
 
 execution_policy:
-  auto_fix_allowed: true
-  auto_fix_low_risk_frontend: true
+  # Classification never authorizes edits. Keep automation off until the team
+  # intentionally reviews the policy; every fix still needs issue-specific approval.
+  auto_fix_allowed: false
+  auto_fix_low_risk_frontend: false
+  allow_lightweight_verification: true
+  approved_completion_actions:
+    - commit
   max_auto_fix_effort: medium
   require_confirmation_for:
     - hard
@@ -183,14 +204,16 @@ execution_policy:
     - backend-contract-change
 
 git_policy:
-  auto_commit_after_fix: true
+  # Keep automatic commits off. A manual commit also needs explicit approval,
+  # current structured verification, and an initially empty Git index.
+  auto_commit_after_fix: false
   commit_after_verification_only: true
   stage_policy: touched-files-only
   push_after_commit: false
   commit_message_template: "fix({issue}): {title}"
 
 comment_template:
-  enabled: true
+  enabled: false
   body: |
     Fix summary:
     - <summary>

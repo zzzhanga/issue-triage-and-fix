@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 STANDARD_FIELDS = {
@@ -21,10 +23,90 @@ STANDARD_FIELDS = {
     "description": ["description", "body", "content"],
     "requirements": ["requirements", "_field_linked_story", "requirement", "demand", "story", "related_requirement", "需求"],
     "attachments": ["attachments", "files", "field_696151"],
+    "comments": ["comments", "comment_list", "work_item_comments"],
+    "activities": ["activities", "activity_list", "op_records", "operation_records"],
+    "evidence_fetch": ["evidence_fetch", "evidence_review"],
     "created_at": ["created_at", "created", "created_time", "start_time", "field_eea32c"],
     "updated_at": ["updated_at", "updated", "modified_at"],
     "source_url": ["source_url", "url", "link", "web_url"],
 }
+
+
+REDACTED = "[REDACTED]"
+SENSITIVE_KEYS_EXACT = {
+    "accesskey",
+    "apikey",
+    "auth",
+    "authkey",
+    "sign",
+    "sig",
+    "xmeegofilesign",
+}
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+EVIDENCE_SOURCE_STATES = {"complete", "partial", "not-applicable", "skipped", "error", "unknown"}
+SENSITIVE_KEY_PARTS = {
+    "authorization",
+    "bearer",
+    "cookie",
+    "credential",
+    "mcpurl",
+    "password",
+    "passwd",
+    "privatekey",
+    "refreshtoken",
+    "secret",
+    "session",
+    "signature",
+    "token",
+}
+
+
+def normalized_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value).lower())
+
+
+def is_sensitive_key(value: Any) -> bool:
+    key = normalized_key(value)
+    return key in SENSITIVE_KEYS_EXACT or any(part in key for part in SENSITIVE_KEY_PARTS)
+
+
+def redact_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or not parsed.query:
+        return value
+    query = [
+        (key, REDACTED if is_sensitive_key(key) else item_value)
+        for key, item_value in parse_qsl(parsed.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
+
+
+def redact_text(value: str) -> str:
+    redacted = re.sub(r"(?i)\bbearer\s+[^\s,;]+", f"Bearer {REDACTED}", value)
+    return URL_PATTERN.sub(lambda match: redact_url(match.group(0)), redacted)
+
+
+def redact_sensitive_data(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): REDACTED if is_sensitive_key(key) else redact_sensitive_data(item_value)
+            for key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        return [redact_sensitive_data(item) for item in value]
+    if isinstance(value, str):
+        return redact_text(value)
+    return value
+
+
+def configure_utf8_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8")
 
 
 def load_json(path: str | None) -> Any:
@@ -148,7 +230,117 @@ def normalize_requirements(value: Any) -> list[dict[str, Any]]:
     return [normalize_requirement_item(value)]
 
 
-def normalize_issue(issue: dict[str, Any], platform: str, mapping: dict[str, str]) -> dict[str, Any]:
+def extract_plain_text(value: Any) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(part for item in value if (part := extract_plain_text(item)))
+    if isinstance(value, dict):
+        preferred = []
+        for key in ("content_text", "plain_text", "text", "content", "body", "title"):
+            if key in value and value[key] not in (None, ""):
+                text = extract_plain_text(value[key])
+                if text:
+                    preferred.append(text)
+        return "\n".join(dict.fromkeys(preferred))
+    return str(value)
+
+
+def list_payload_items(value: Any, keys: tuple[str, ...]) -> list[Any]:
+    if value in (None, ""):
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in keys:
+            if isinstance(value.get(key), list):
+                return value[key]
+    return [value]
+
+
+def normalize_comment_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {
+            "id": None,
+            "author": None,
+            "created_at": None,
+            "updated_at": None,
+            "content_text": extract_plain_text(item),
+            "attachments": [],
+        }
+    return {
+        "id": item.get("id") or item.get("comment_id") or item.get("key"),
+        "author": normalize_assignee(item.get("author") or item.get("creator") or item.get("user")),
+        "created_at": item.get("created_at") or item.get("create_time") or item.get("created_time"),
+        "updated_at": item.get("updated_at") or item.get("update_time") or item.get("updated_time"),
+        "content_text": extract_plain_text(
+            item.get("content_text") or item.get("plain_text") or item.get("content") or item.get("body") or item.get("text")
+        ),
+        "attachments": item.get("attachments") or item.get("files") or [],
+    }
+
+
+def normalize_comments(value: Any) -> list[dict[str, Any]]:
+    items = list_payload_items(value, ("items", "comments", "comment_list", "data"))
+    comments = [normalize_comment_item(item) for item in items]
+    return sorted(comments, key=lambda item: (str(item.get("created_at") or ""), str(item.get("id") or "")))
+
+
+def normalize_activity_item(item: Any) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {"id": None, "occurred_at": None, "operator": None, "summary": extract_plain_text(item)}
+    return {
+        "id": item.get("id") or item.get("record_id") or item.get("key"),
+        "occurred_at": item.get("occurred_at") or item.get("created_at") or item.get("operate_time") or item.get("time"),
+        "operator": normalize_assignee(item.get("operator") or item.get("user") or item.get("creator")),
+        "module": item.get("module") or item.get("module_type"),
+        "operation_type": item.get("operation_type") or item.get("type") or item.get("action"),
+        "field_key": item.get("field_key") or item.get("field"),
+        "summary": extract_plain_text(item.get("summary") or item.get("description") or item.get("content") or item.get("text")),
+    }
+
+
+def normalize_activities(value: Any) -> list[dict[str, Any]]:
+    items = list_payload_items(value, ("items", "activities", "records", "op_records", "data"))
+    activities = [normalize_activity_item(item) for item in items]
+    return sorted(activities, key=lambda item: (str(item.get("occurred_at") or ""), str(item.get("id") or "")))
+
+
+def normalize_evidence_fetch(value: Any) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "status": "unknown",
+        "detail": "unknown",
+        "comments": "unknown",
+        "activities": "unknown",
+        "media": "unknown",
+        "fetched_at": None,
+        "findings": [],
+        "missing": ["Evidence intake has not been completed."],
+    }
+    if isinstance(value, dict):
+        result.update(value)
+    elif value not in (None, ""):
+        result["status"] = str(value)
+    for key in ("status", "detail", "comments", "activities", "media"):
+        state = str(result.get(key) or "unknown").strip().lower()
+        result[key] = state if state in EVIDENCE_SOURCE_STATES else "unknown"
+    for key in ("findings", "missing"):
+        current = result.get(key)
+        if current in (None, ""):
+            result[key] = []
+        elif not isinstance(current, list):
+            result[key] = [str(current)]
+    return result
+
+
+def normalize_issue(
+    issue: dict[str, Any],
+    platform: str,
+    mapping: dict[str, str],
+    retain_raw: bool = False,
+) -> dict[str, Any]:
     raw_issue = issue
     issue = flatten_moql_record(issue)
     normalized: dict[str, Any] = {"source": platform}
@@ -166,11 +358,27 @@ def normalize_issue(issue: dict[str, Any], platform: str, mapping: dict[str, str
     normalized["reporter"] = normalize_assignee(normalized.get("reporter"))
     normalized["requirements"] = normalize_requirements(normalized.get("requirements"))
     normalized["attachments"] = normalized.get("attachments") or []
-    normalized["raw"] = raw_issue.get("raw", raw_issue) if raw_issue.get("source") == platform else raw_issue
+    normalized["comments"] = normalize_comments(normalized.get("comments"))
+    normalized["activities"] = normalize_activities(normalized.get("activities"))
+    normalized["evidence_fetch"] = normalize_evidence_fetch(normalized.get("evidence_fetch"))
+    raw_payload = raw_issue.get("raw", raw_issue) if raw_issue.get("source") == platform else raw_issue
+    if retain_raw:
+        normalized["raw"] = raw_payload
+    else:
+        normalized["raw"] = redact_sensitive_data(raw_payload)
+        normalized["requirements"] = redact_sensitive_data(normalized["requirements"])
+        normalized["attachments"] = redact_sensitive_data(normalized["attachments"])
+        normalized["comments"] = redact_sensitive_data(normalized["comments"])
+        normalized["activities"] = redact_sensitive_data(normalized["activities"])
+        normalized["evidence_fetch"] = redact_sensitive_data(normalized["evidence_fetch"])
+        for field in ("description", "source_url"):
+            if normalized.get(field) not in (None, ""):
+                normalized[field] = redact_sensitive_data(normalized[field])
     return normalized
 
 
 def main() -> int:
+    configure_utf8_stdio()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", help="JSON file to read. Reads stdin when omitted.")
     parser.add_argument("--output", help="JSON file to write. Writes stdout when omitted.")
@@ -178,6 +386,11 @@ def main() -> int:
     parser.add_argument(
         "--mapping",
         help="Optional JSON object or JSON file mapping standard fields to source paths.",
+    )
+    parser.add_argument(
+        "--retain-raw",
+        action="store_true",
+        help="Keep the full raw payload. By default sensitive keys and signed URL parameters are redacted.",
     )
     args = parser.parse_args()
 
@@ -202,7 +415,7 @@ def main() -> int:
     else:
         raise SystemExit("Input must be a JSON object or array.")
 
-    normalized = [normalize_issue(issue, args.platform, mapping) for issue in issues]
+    normalized = [normalize_issue(issue, args.platform, mapping, retain_raw=args.retain_raw) for issue in issues]
     output = json.dumps(normalized, ensure_ascii=False, indent=2)
 
     if args.output:

@@ -4,7 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
+import sys
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -135,11 +139,43 @@ ARTIFACTS = [
 ]
 
 
+WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{index}" for index in range(1, 10)),
+    *(f"LPT{index}" for index in range(1, 10)),
+}
+
+
+def issue_slug(issue: str) -> str:
+    """Return a readable, collision-resistant directory name for an issue key."""
+
+    original = str(issue).strip()
+    if not original or original in {".", ".."}:
+        raise SystemExit("Issue id/number is required and cannot be '.' or '..'.")
+    normalized = unicodedata.normalize("NFKC", original)
+    reserved_stem = normalized.rstrip(" .").split(".", 1)[0].upper()
+    if reserved_stem in WINDOWS_RESERVED_NAMES:
+        raise SystemExit(f"Issue id/number uses a reserved Windows name: {reserved_stem}")
+    readable = re.sub(r"[^\w.-]+", "-", normalized, flags=re.UNICODE).strip(" .-_")
+    if not readable or readable in {".", ".."}:
+        readable = "issue"
+    if readable == original and len(readable) <= 80:
+        return readable
+    digest = hashlib.sha256(original.encode("utf-8")).hexdigest()[:10]
+    return f"{readable[:80]}--{digest}"
+
+
 def issue_dir(root: Path, issue: str) -> Path:
-    safe_issue = issue.strip().replace("/", "-").replace("\\", "-")
-    if not safe_issue:
-        raise SystemExit("Issue id/number is required.")
-    return root / safe_issue
+    root = Path(root)
+    target = root / issue_slug(issue)
+    resolved_root = root.resolve()
+    resolved_target = target.resolve()
+    if not resolved_target.is_relative_to(resolved_root):
+        raise SystemExit(f"Refusing issue directory outside configured root: {issue!r}")
+    return target
 
 
 def frontmatter_status(path: Path) -> str:
@@ -155,6 +191,119 @@ def frontmatter_status(path: Path) -> str:
         if line.startswith("status:"):
             return line.split(":", 1)[1].strip() or "pending"
     return "pending"
+
+
+def frontmatter_metadata(path: Path) -> dict[str, str]:
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---"):
+        return {}
+    metadata: dict[str, str] = {}
+    for line in text.splitlines()[1:]:
+        if line.strip() == "---":
+            break
+        if ":" in line:
+            key, value = line.split(":", 1)
+            metadata[key.strip()] = value.strip()
+    return metadata
+
+
+def replace_frontmatter(path: Path, updates: dict[str, str]) -> None:
+    text = path.read_text(encoding="utf-8") if path.exists() else ""
+    body = text
+    metadata = frontmatter_metadata(path)
+    if text.startswith("---"):
+        parts = text.split("---", 2)
+        if len(parts) == 3:
+            body = parts[2].lstrip("\r\n")
+    metadata.update(updates)
+    artifact_id = metadata.pop("artifact", "")
+    status = metadata.pop("status", "pending")
+    lines = ["---"]
+    if artifact_id:
+        lines.append(f"artifact: {artifact_id}")
+    lines.append(f"status: {status}")
+    lines.extend(f"{key}: {value}" for key, value in metadata.items() if value != "")
+    lines.extend(["---", "", body])
+    path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def artifact_definition(artifact_id: str) -> dict[str, Any]:
+    for artifact in ARTIFACTS:
+        if artifact["id"] == artifact_id:
+            return artifact
+    raise KeyError(artifact_id)
+
+
+def artifact_file_hash(path: Path) -> str:
+    if not path.exists() or not path.is_file():
+        return "missing"
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def dependency_fingerprint(issue_root: Path, artifact_id: str) -> str:
+    artifact = artifact_definition(artifact_id)
+    dependencies: list[dict[str, str]] = []
+    for dependency_id in artifact["requires"]:
+        dependency = artifact_definition(dependency_id)
+        dependency_path = issue_root / dependency["file"]
+        dependencies.append(
+            {
+                "artifact": dependency_id,
+                "file": dependency["file"],
+                "sha256": artifact_file_hash(dependency_path),
+            }
+        )
+    payload = json.dumps(dependencies, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def downstream_artifact_ids(artifact_id: str) -> list[str]:
+    downstream: list[str] = []
+    reached = {artifact_id}
+    for artifact in ARTIFACTS:
+        if any(dependency in reached for dependency in artifact["requires"]):
+            reached.add(artifact["id"])
+            downstream.append(artifact["id"])
+    return downstream
+
+
+def invalidate_downstream(issue_root: Path, artifact_id: str) -> list[str]:
+    invalidated: list[str] = []
+    for downstream_id in downstream_artifact_ids(artifact_id):
+        artifact = artifact_definition(downstream_id)
+        path = issue_root / artifact["file"]
+        if not path.exists() or artifact["file"] == "issue.json":
+            continue
+        replace_frontmatter(
+            path,
+            {
+                "status": "pending",
+                "dependency_hash": "",
+                "invalidated_by": artifact_id,
+            },
+        )
+        invalidated.append(downstream_id)
+    return invalidated
+
+
+def effective_artifact_status(issue_root: Path, artifact_id: str) -> str:
+    artifact = artifact_definition(artifact_id)
+    path = issue_root / artifact["file"]
+    if artifact["file"] == "issue.json":
+        return "done" if issue_json_done(path) else "missing"
+    explicit = frontmatter_status(path)
+    if explicit != "done":
+        return explicit
+    for dependency_id in artifact["requires"]:
+        if effective_artifact_status(issue_root, dependency_id) != "done":
+            return "stale"
+    metadata = frontmatter_metadata(path)
+    expected = dependency_fingerprint(issue_root, artifact_id)
+    if metadata.get("dependency_hash") != expected:
+        return "stale"
+    return "done"
 
 
 def write_if_absent(path: Path, content: str) -> bool:
@@ -182,6 +331,18 @@ def init_artifacts(args: argparse.Namespace) -> int:
         "status": args.status or "",
         "requirements": [],
         "attachments": [],
+        "comments": [],
+        "activities": [],
+        "evidence_fetch": {
+            "status": "unknown",
+            "detail": "unknown",
+            "comments": "unknown",
+            "activities": "unknown",
+            "media": "unknown",
+            "fetched_at": None,
+            "findings": [],
+            "missing": ["Evidence intake has not been completed."],
+        },
         "raw": {},
     }
 
@@ -226,7 +387,7 @@ def status_artifacts(args: argparse.Namespace) -> int:
             explicit_status = "done" if artifact_done else "missing"
         else:
             explicit_status = frontmatter_status(path)
-            artifact_done = explicit_status == "done"
+            artifact_done = effective_artifact_status(target, artifact["id"]) == "done"
         if artifact_done:
             done.add(artifact["id"])
         raw_items.append(
@@ -244,8 +405,11 @@ def status_artifacts(args: argparse.Namespace) -> int:
     items: list[dict[str, Any]] = []
     for item in raw_items:
         missing_deps = [dep for dep in item["requires"] if dep not in done]
+        effective_status = effective_artifact_status(target, item["id"])
         if item["done"]:
             state = "done"
+        elif effective_status in ("stale", "partial"):
+            state = effective_status
         elif item["explicit_status"] == "blocked":
             state = "blocked"
         elif missing_deps:
@@ -267,6 +431,10 @@ def status_artifacts(args: argparse.Namespace) -> int:
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
 

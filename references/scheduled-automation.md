@@ -13,8 +13,7 @@
 
 - 运行环境：本地。
 - 项目路径：当前代码库根目录。
-- 模型：`GPT-5.5`。
-- 推理级别：`超高/xhigh`。
+- 模型与推理级别：保留用户已有设置；新任务使用当前环境可用的推荐默认值，不在 Skill 中写死型号。
 - 模式：每日分诊优先，不改业务代码、不改远程状态、不提交分支。
 
 ## 推荐 prompt 要点
@@ -23,13 +22,14 @@
 
 - 使用 `$issue-triage-and-fix`。
 - 读取 `AGENTS.md` 和 `.codex/bugflow/` 下的项目配置。
-- 使用 Codex 内置 Python 运行 `bugflow_runner.py doctor`，不要先用系统 `python` 再用 `uv` 兜底；报告 warn/error，有 error 时停止。
+- 从任务环境解析一个可用的 Python 3 解释器，安装 `requirements.txt` 后用同一解释器运行 `bugflow_runner.py doctor`；报告 warn/error，有 error 时停止。
 - 如果 `doctor` 中 `field-mapping`、`requirement-field` 和 `status-codes` 都是 ok，后续拉取应信任项目配置，不要再做全量字段发现。
 - 使用 `bugflow_runner.py feishu-mql --json` 从配置生成本次最小 SELECT 和精确字段配置 key。
 - 只有 MQL 报字段错误、配置缺字段，或用户明确要求重新发现字段时，才用字段配置工具做精确查询。
 - 拉取分配给当前用户、状态为待修复或重新打开的工单。
-- 包含关联需求、标题、状态、优先级、描述、截图/附件、负责人和更新时间。
-- 生成或更新 `.bugflow/issues/<bug-number>/` 工件。
+- 候选列表之后逐条获取完整详情、历史评论和相关操作记录；包含关联需求、标题、状态、优先级、描述、截图/附件、负责人和更新时间。
+- 按 `evidence-intake.md` 实际检查决策相关图片/视频/文档内容并记录 `evidence_fetch`。只拿到附件元数据、缩略图或视频封面时不得标记证据完整；无法读取则进入“需要确认”，不生成高置信/自动修复候选。
+- 生成或更新 `.bugflow/issues/<safe-issue-key>/` 工件。
 - 只处理本次拉取到的 bug；不要扫描 `.bugflow/issues` 下的历史目录混入日报。
 - 输出每日分诊报告：先给缺陷总览表格，再给证据与判断、推荐修复顺序、需要确认事项；不要用大段过程日志替代表格。
 - 明确安全边界：不索要密钥、不改远程状态、不改代码、不提交。
@@ -60,16 +60,18 @@
 
 定时分诊应优先走快路径，避免把一次日报变成探索式会话：
 
-1. 用 Codex 内置 Python 跑 `doctor`。
+1. 用已解析并完成依赖检查的 Python 3 解释器跑 `doctor`。
 2. 用 `feishu-mql --json` 生成本次最小查询。
-3. 用 MCP 查本次待处理 issue。
-4. 把本次查询结果转成标准 JSON。
+3. 用 MCP 查本次待处理 issue 候选列表。
+4. 对每个候选获取 full detail，分页读取评论，按需读取活动记录，并检查决策相关附件；把完整度、摘要和缺失项写入标准 JSON。
 5. 用 `bugflow_runner.py daily --input <json> --report .bugflow/daily-report.md` 更新工件和日报。
-6. 输出日报摘要。
+6. 输出日报摘要；证据不完整的工单只给初步判断和精确阻塞项。
+
+定时任务必须使用 `feishu-mql` 生成的 `current_login_user()` 负责人过滤结果；不要把全项目 JSON 当作“我的工单”导入。非飞书导出任务必须配置当前用户并向 `daily` 传 `--assignee <name-or-id>`。
 
 `search_by_mql` 返回 `moql_field_list` 时，可以直接把该记录传给 runner；runner 会保留顶层字段并按字段 key 扁平化。为保证表格信息完整，SELECT 至少包含配置里映射的 `id`、`number`、`title`、`status`、`priority`、`reporter`、`assignee`、`created_at`、`updated_at`、`requirements`、`description` 和 `attachments`。
 
-不要在快路径中读取 automation memory、重新探索可用工具、扫描历史 bugflow 目录、运行 build/lint、打开浏览器或做代码修复。
+不要在快路径中读取 automation memory、重新探索可用工具、扫描历史 bugflow 目录、运行 build/lint、打开浏览器或做代码修复。附件检查应使用现有 MCP 下载能力和安全的本地媒体工具；工具/权限缺失时记录 `partial|error`，不要退化为只看标题。
 
 ## 字段发现策略
 
