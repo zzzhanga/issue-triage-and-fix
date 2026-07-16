@@ -38,9 +38,10 @@ ASSETS_DIR = SKILL_ROOT / "assets"
 CURRENT_LOGIN_USER = "current_login_user()"
 LIGHTWEIGHT_VERIFICATION_MODE = "lightweight"
 STANDARD_VERIFICATION_MODE = "standard"
+DEFERRED_USER_VERIFICATION_MODE = "deferred-to-user"
 REPORT_QUALITY_POLICY_VERSION = "2"
 REPORT_HASH_VERSION = "1"
-ARTIFACT_SCHEMA_VERSION = "3"
+ARTIFACT_SCHEMA_VERSION = "4"
 REPORT_QUALITY_GATED_ARTIFACTS = {
     "triage-report",
     "fix-plan",
@@ -101,6 +102,7 @@ LOCAL_RESTRICTIVE_BOOLEAN_PATHS = (
     "execution_policy.auto_fix_allowed",
     "execution_policy.auto_fix_low_risk_frontend",
     "execution_policy.allow_lightweight_verification",
+    "execution_policy.allow_deferred_user_verification",
     "git_policy.auto_commit_after_fix",
     "git_policy.push_after_commit",
     "login_policy.allow_qr_login",
@@ -2399,11 +2401,50 @@ def repair_gate(config: dict[str, Any], item: dict[str, Any], approved: bool) ->
 
 def normalize_completion_actions(config: dict[str, Any], args: argparse.Namespace) -> list[str]:
     requested = getattr(args, "completion_action", None)
-    values = requested if requested else config_value(config, "execution_policy.approved_completion_actions", [])
+    if requested:
+        values = requested
+    elif (
+        getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE)
+        == DEFERRED_USER_VERIFICATION_MODE
+    ):
+        values = config_value(
+            config,
+            "execution_policy.assisted_completion_actions",
+            None,
+        )
+        if values is None:
+            autonomous_values = config_value(
+                config, "execution_policy.approved_completion_actions", []
+            )
+            if not isinstance(autonomous_values, list):
+                raise SystemExit(
+                    "execution_policy.approved_completion_actions must be a list."
+                )
+            values = [
+                value
+                for value in autonomous_values
+                if str(value).strip() in ("commit", "start-fix")
+            ]
+    else:
+        values = config_value(
+            config, "execution_policy.approved_completion_actions", []
+        )
+        if not isinstance(values, list):
+            raise SystemExit(
+                "execution_policy.approved_completion_actions must be a list."
+            )
+        # Legacy project configs may still list resolve-for-acceptance in the
+        # autonomous default bundle. Normal repair runs must end at in-progress;
+        # a later resolved transition has to be requested explicitly.
+        values = [
+            value
+            for value in values
+            if str(value).strip() in ("commit", "start-fix")
+        ]
     if values in (None, ""):
         return []
     if not isinstance(values, list):
-        raise SystemExit("execution_policy.approved_completion_actions must be a list.")
+        raise SystemExit("The selected execution-policy completion action bundle must be a list.")
     actions = list(dict.fromkeys(str(value).strip() for value in values if str(value).strip()))
     invalid = sorted(set(actions) - COMPLETION_ACTIONS)
     if invalid:
@@ -2525,15 +2566,27 @@ def render_fix_plan(
 
     files = "\n".join(f"- {file}" for file in args.files) if args.files else "- 待代码搜索后确认"
     required_checks = getattr(args, "required_checks", None) or []
-    verification = "\n".join(
-        f"- {step}" for step in configured_verification_steps(config, required_checks)
-    ) or "- 当前配置没有可执行的 Standard 检查；补充配置或改用获批的 lightweight 模式"
+    verification_mode = getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE)
+    if verification_mode == DEFERRED_USER_VERIFICATION_MODE:
+        verification = (
+            "- AI 不运行修复验证、测试、构建或浏览器检查。\n"
+            "- 修改可按已授权计划先提交，人工验证前保持远程工单原状态。\n"
+            "- 等用户明确反馈验收结果后，以 `verified_by: user` 记录验证；通过后才执行 `start-fix`。"
+        )
+    else:
+        verification = "\n".join(
+            f"- {step}" for step in configured_verification_steps(config, required_checks)
+        ) or "- 当前配置没有可执行的 Standard 检查；补充配置或改用获批的 lightweight 模式"
     approval = "已按计划指纹批准" if approved else "未批准"
     route = args.route or "待确认"
     notes = args.notes or "无"
-    verification_mode = getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE)
     completion_actions = getattr(args, "completion_action", None) or []
     completion_lines = "\n".join(f"- {action}" for action in completion_actions) or "- 无"
+    action_timing = (
+        "先 commit；人工验证通过后再执行 start-fix；不自动 resolve-for-acceptance"
+        if verification_mode == DEFERRED_USER_VERIFICATION_MODE
+        else "先完成 AI 验证与 commit，再执行 start-fix；以修复中结束，不自动 resolve-for-acceptance"
+    )
     return f"""# 修复计划
 
 ## 工单
@@ -2563,7 +2616,7 @@ def render_fix_plan(
 2. 复现或定位工单描述中的问题路径。
 3. 做最小范围修复，优先复用项目现有组件、工具函数和样式模式。
 4. 更新必要的 mock、类型、测试或回归脚本。
-5. 运行下面的验证计划，并把结果写入 `verification.md`。
+5. 按下面的验证模式执行；`deferred-to-user` 只记录待人工验证，不由 AI 运行验证。
 
 ## 验证计划
 
@@ -2579,6 +2632,7 @@ def render_fix_plan(
 
 - 本计划批准后允许连续执行的收尾动作：
 {completion_lines}
+- 执行时序: {action_timing}
 - 只有动作在本计划中列出、项目配置允许且本地未禁止时，才可执行；未列出的动作仍需另行批准。
 
 ## 备注
@@ -2599,7 +2653,8 @@ def plan_fix(args: argparse.Namespace) -> int:
     args.verification_mode = getattr(args, "verification_mode", STANDARD_VERIFICATION_MODE)
     args.required_checks = (
         []
-        if args.verification_mode == LIGHTWEIGHT_VERIFICATION_MODE
+        if args.verification_mode
+        in (LIGHTWEIGHT_VERIFICATION_MODE, DEFERRED_USER_VERIFICATION_MODE)
         else required_verification_checks(config, issue, planned_files, args.route or "")
     )
     args.completion_action = normalize_completion_actions(config, args)
@@ -2651,6 +2706,9 @@ def plan_fix(args: argparse.Namespace) -> int:
             "planning_diagnostic": planning_diagnostic,
             "planned_files": recorded_files,
             "verification_mode": recorded_verification_mode,
+            "user_verification_deferred": (
+                recorded_verification_mode == DEFERRED_USER_VERIFICATION_MODE
+            ),
             "required_checks": [] if planning_diagnostic else args.required_checks,
             "route": "" if planning_diagnostic else (args.route or ""),
             "completion_actions": recorded_completion_actions,
@@ -2664,6 +2722,9 @@ def plan_fix(args: argparse.Namespace) -> int:
         "plan_fingerprint": fingerprint,
         "planning_diagnostic": planning_diagnostic,
         "verification_mode": recorded_verification_mode,
+        "user_verification_deferred": (
+            recorded_verification_mode == DEFERRED_USER_VERIFICATION_MODE
+        ),
         "required_checks": [] if planning_diagnostic else args.required_checks,
         "completion_actions": recorded_completion_actions,
         "blockers": blockers,
@@ -2920,6 +2981,16 @@ def verification_status(
         if not [item for item in (args.evidence or []) if str(item).strip()]:
             return "pending"
         return "done"
+    if mode == DEFERRED_USER_VERIFICATION_MODE:
+        if getattr(args, "verified_by", "") != "user":
+            return "pending"
+        passed_evidence = (
+            any(item["result"] == "passed" for item in commands)
+            or any(item["result"] == "passed" for item in explicit_checks)
+            or args.browser == "passed"
+            or bool([item for item in (args.evidence or []) if str(item).strip()])
+        )
+        return "done" if passed_evidence else "pending"
     if required_checks is not None:
         if not required_checks:
             return "pending"
@@ -3020,6 +3091,13 @@ def record_verification(args: argparse.Namespace) -> int:
     planned_mode = plan_metadata.get("verification_mode") or STANDARD_VERIFICATION_MODE
     if planned_mode != getattr(args, "mode", STANDARD_VERIFICATION_MODE):
         raise SystemExit("Verification mode does not match the approved fix plan.")
+    if (
+        planned_mode == DEFERRED_USER_VERIFICATION_MODE
+        and getattr(args, "verified_by", "") != "user"
+    ):
+        raise SystemExit(
+            "Deferred-to-user verification requires direct human confirmation recorded with --verified-by user."
+        )
     args.verified_at = utc_now_iso()
     if not str(getattr(args, "verified_by", "") or "").strip():
         raise SystemExit("record-verification requires --verified-by user|agent|ci.")
@@ -3047,6 +3125,12 @@ def record_verification(args: argparse.Namespace) -> int:
                 getattr(args, "mode", STANDARD_VERIFICATION_MODE) == LIGHTWEIGHT_VERIFICATION_MODE
                 and status == "done"
                 and not policy_blockers
+            ),
+            "human_verified": (
+                getattr(args, "mode", STANDARD_VERIFICATION_MODE)
+                == DEFERRED_USER_VERIFICATION_MODE
+                and args.verified_by == "user"
+                and status == "done"
             ),
             "required_checks": required_checks,
             "verified_by": args.verified_by,
@@ -3244,9 +3328,44 @@ def commit_fix(args: argparse.Namespace) -> int:
             f"(project auto-commit capability is {policy} and does not replace plan-bound action authorization)."
         )
     require_artifact_done(target, "implementation", "commit fix")
-    require_artifact_done(target, "verification", "commit fix")
     implementation_metadata = frontmatter_metadata(artifact_path(target, "implementation"))
-    verification_metadata = frontmatter_metadata(artifact_path(target, "verification"))
+    planned_verification_mode = (
+        plan_metadata.get("verification_mode") or STANDARD_VERIFICATION_MODE
+    )
+    verification_path = artifact_path(target, "verification")
+    verification_pending = False
+    verification_metadata: dict[str, str] = {}
+    if planned_verification_mode == DEFERRED_USER_VERIFICATION_MODE:
+        if not bool(
+            config_value(
+                config,
+                "execution_policy.allow_deferred_user_verification",
+                False,
+            )
+        ):
+            raise SystemExit(
+                "Project policy disables commit before deferred user verification."
+            )
+        if "execution_policy.allow_deferred_user_verification" in local_denies:
+            raise SystemExit(
+                "Local deny-only config disables commit before deferred user verification."
+            )
+        verification_state = artifact_effective_status(target, "verification")
+        if verification_state == "done":
+            verification_metadata = frontmatter_metadata(verification_path)
+            if verification_metadata.get("human_verified") != "true":
+                raise SystemExit(
+                    "Deferred verification exists but lacks direct user confirmation."
+                )
+        elif verification_state == "pending":
+            verification_pending = True
+        else:
+            raise SystemExit(
+                "Deferred user verification is blocked or stale; record a valid human result before commit."
+            )
+    else:
+        require_artifact_done(target, "verification", "commit fix")
+        verification_metadata = frontmatter_metadata(verification_path)
     if int(implementation_metadata.get("summary_count") or 0) < 1 or int(implementation_metadata.get("file_count") or 0) < 1:
         raise SystemExit("Implementation evidence is empty; record a non-empty summary and changed-file list first.")
     try:
@@ -3255,13 +3374,19 @@ def commit_fix(args: argparse.Namespace) -> int:
         raise SystemExit("Implementation file evidence is malformed; record implementation again.") from exc
     if not isinstance(implementation_files, list) or set(str(item) for item in implementation_files) != set(files):
         raise SystemExit("commit-fix --files must exactly match the files recorded in the verified implementation.")
-    verification_mode = verification_metadata.get("verification_mode") or STANDARD_VERIFICATION_MODE
-    evidence_count = int(verification_metadata.get("evidence_count") or 0)
-    if verification_mode == LIGHTWEIGHT_VERIFICATION_MODE:
-        if verification_metadata.get("lightweight_approved") != "true" or evidence_count < 1:
-            raise SystemExit("Lightweight verification lacks an approved exception or inspection evidence.")
-    elif int(verification_metadata.get("passed_checks") or 0) < 1 or evidence_count < 1:
-        raise SystemExit("Verification has no structured passing evidence; record verification again.")
+    verification_mode = (
+        verification_metadata.get("verification_mode") or planned_verification_mode
+    )
+    if not verification_pending:
+        evidence_count = int(verification_metadata.get("evidence_count") or 0)
+        if verification_mode == LIGHTWEIGHT_VERIFICATION_MODE:
+            if verification_metadata.get("lightweight_approved") != "true" or evidence_count < 1:
+                raise SystemExit("Lightweight verification lacks an approved exception or inspection evidence.")
+        elif verification_mode == DEFERRED_USER_VERIFICATION_MODE:
+            if verification_metadata.get("human_verified") != "true" or evidence_count < 1:
+                raise SystemExit("Deferred verification lacks direct user confirmation evidence.")
+        elif int(verification_metadata.get("passed_checks") or 0) < 1 or evidence_count < 1:
+            raise SystemExit("Verification has no structured passing evidence; record verification again.")
 
     staged_before = run_git(["diff", "--cached", "--name-only", "-z"], cwd=repo_root)
     if staged_before.returncode != 0:
@@ -3284,6 +3409,8 @@ def commit_fix(args: argparse.Namespace) -> int:
                     "message": message,
                     "files": files,
                     "status": status.stdout.splitlines(),
+                    "verification_mode": verification_mode,
+                    "verification_pending": verification_pending,
                     "dry_run": True,
                 },
                 ensure_ascii=False,
@@ -3316,6 +3443,8 @@ def commit_fix(args: argparse.Namespace) -> int:
                 "files": files,
                 "commit": commit_hash,
                 "pushed": False,
+                "verification_mode": verification_mode,
+                "verification_pending": verification_pending,
             },
             ensure_ascii=False,
             indent=2,
@@ -3963,22 +4092,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--approved",
         metavar="PLAN_FINGERPRINT",
         default="",
-        help="Approve only the exact plan fingerprint printed by an earlier blocked plan-fix run.",
+        help=(
+            "Record approval only for the exact fingerprint printed by an earlier plan-fix run, "
+            "using a current direct/batch repair authorization or explicit plan approval."
+        ),
     )
     plan_parser.add_argument("--files", nargs="*", default=[], help="Expected files or areas to inspect/change.")
     plan_parser.add_argument("--route", default="", help="Browser route or workflow to verify.")
     plan_parser.add_argument("--notes", default="", help="Additional planning notes.")
     plan_parser.add_argument(
         "--verification-mode",
-        choices=[STANDARD_VERIFICATION_MODE, LIGHTWEIGHT_VERIFICATION_MODE],
+        choices=[
+            STANDARD_VERIFICATION_MODE,
+            LIGHTWEIGHT_VERIFICATION_MODE,
+            DEFERRED_USER_VERIFICATION_MODE,
+        ],
         default=STANDARD_VERIFICATION_MODE,
-        help="Use standard checks or a plan-approved lightweight path for hard-to-automate low-risk fixes.",
+        help=(
+            "Use standard checks, plan-approved lightweight inspection, or defer all repair "
+            "verification to the user in assisted mode."
+        ),
     )
     plan_parser.add_argument(
         "--completion-action",
         action="append",
         choices=sorted(COMPLETION_ACTIONS),
-        help="Action covered by approval of this exact plan. Repeat as needed.",
+        help="Action bound to this issue plan and its current run authorization. Repeat as needed.",
     )
     plan_parser.set_defaults(func=plan_fix)
 
@@ -3996,7 +4135,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--issue", required=True, help="Issue number/id.")
     verify_parser.add_argument(
         "--mode",
-        choices=[STANDARD_VERIFICATION_MODE, LIGHTWEIGHT_VERIFICATION_MODE],
+        choices=[
+            STANDARD_VERIFICATION_MODE,
+            LIGHTWEIGHT_VERIFICATION_MODE,
+            DEFERRED_USER_VERIFICATION_MODE,
+        ],
         default=STANDARD_VERIFICATION_MODE,
         help="Use the verification mode approved in the current fix plan.",
     )
@@ -4051,7 +4194,10 @@ def build_parser() -> argparse.ArgumentParser:
     close_parser.add_argument("--allow-partial", action="store_true", help="Allow closure when verification is not done.")
     close_parser.set_defaults(func=close_local)
 
-    commit_parser = subparsers.add_parser("commit-fix", help="Create a local git commit for one verified fix.")
+    commit_parser = subparsers.add_parser(
+        "commit-fix",
+        help="Create one isolated local commit after autonomous verification or in approved assisted mode.",
+    )
     commit_parser.add_argument("--issue", required=True, help="Issue number/id.")
     commit_parser.add_argument("--files", nargs="+", required=True, help="Fix-related files to stage and commit.")
     commit_parser.add_argument("--message", default="", help="Override commit message.")

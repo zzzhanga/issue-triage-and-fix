@@ -1,6 +1,6 @@
 name: issue-triage-and-fix
-version: 3
-description: Two-level workflow with an artifact-free preview scan by default and strict evidence/report-quality artifacts only after a concrete issue is selected for fix-ready repair.
+version: 4
+description: Two-level intake with artifact-free preview, strict fix-ready gates, and autonomous or assisted repair execution profiles.
 
 root: .bugflow/issues
 
@@ -9,7 +9,24 @@ modes:
     description: In-memory current-assignee scan with provisional ownership, risk, priority, ranking, and suspected information gaps; does not create per-issue artifacts or run code/build/browser/remote actions.
     runner_command: preview
   fix-ready:
-    description: User-selected issue workflow with full comments/activities/attachment evidence, bound report quality, requirement matching, strict triage, approved repair, verification, commit, and authorized remote actions.
+    description: User-selected or batch-authorized issue workflow with full comments/activities/attachment evidence, bound report quality, requirement matching, strict triage, plan-bound repair, and autonomous or assisted completion actions.
+
+repair_profiles:
+  autonomous:
+    verification_modes:
+      - standard
+      - lightweight
+    completion_actions:
+      - start-fix
+      - commit
+      - resolve-for-acceptance
+  assisted:
+    verification_modes:
+      - deferred-to-user
+    completion_actions:
+      - commit
+      - start-fix
+    status_timing: Keep the remote status unchanged until direct user verification passes, then execute start-fix only.
 
 artifacts:
   - id: issue-intake
@@ -38,7 +55,7 @@ artifacts:
       - fix-plan
   - id: verification
     generates: verification.md
-    description: Standard required checks or approved lightweight inspection evidence after both intake gates pass, verification provenance (user/agent/ci), browser result, residual risk, and failures.
+    description: Standard required checks, approved lightweight inspection, or direct deferred-to-user evidence after both intake gates pass; includes provenance, browser result, residual risk, and failures.
     requires:
       - implementation
   - id: closure

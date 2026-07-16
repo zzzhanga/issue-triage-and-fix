@@ -1,4 +1,12 @@
 interface:
   display_name: "缺陷分诊与修复"
-  short_description: "默认快速扫描；选定工单后读全证据并受控修复闭环"
-  default_prompt: "使用 $issue-triage-and-fix 只处理分配给我的工单。只分诊/扫描/日报时走 preview：基于可用摘要给暂定归属、风险、优先级和疑似信息缺口，不生成逐工单工件或运行验证。等我选中具体工单后再进入 fix-ready，读全详情、评论与媒体证据，严格评估可实施/验收性，并仅在具体计划获批后受控修复闭环。"
+  short_description: "快速分诊，并支持 AI 或人工验证后标记修复中的批量修复流程"
+  default_prompt: "使用 $issue-triage-and-fix 只处理分配给我的工单：只分诊时快速扫描；无人值守时逐 Bug 修改、AI 验证并提交后再把飞书改为修复中；有人模式先逐 Bug 修改并提交，待我验证通过后再改为修复中。不要自动改为已解决。"
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "feishu-project"
+      description: "飞书 Project MCP 服务；每位用户单独配置 X-Mcp-Token"
+      transport: "streamable_http"
+      url: "https://project.feishu.cn/mcp_server/v1"

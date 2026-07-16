@@ -1,6 +1,6 @@
 # Fix And Verify
 
-Use this reference only after the user explicitly requests repair of a concrete issue or approves that issue's fix plan. An `auto-fix-candidate` label alone is never approval.
+Use this reference only after the user explicitly requests repair of concrete issue ids, starts a batch repair run whose candidate snapshot contains the issue, or approves that issue's fix plan. An `auto-fix-candidate` label alone is never approval.
 
 ## Contents
 
@@ -25,7 +25,7 @@ Before editing:
 - Inspect relevant code and tests.
 - Check the worktree for existing changes and avoid reverting user work.
 - Confirm whether remote status may be changed to in progress.
-- Put every intended completion action (`commit`, `start-fix`, `resolve-for-acceptance`, comment, complete, or terminate) in the exact plan shown to the user.
+- Choose `autonomous` or `assisted` from `execution-modes.md` and put only that mode's completion actions in the issue plan.
 
 Do not repair any issue without `fix_approved(issue)`. Resolve every concrete blocker first. `--approved` must not bypass unresolved product/customer confirmation, `not-current-repo` ownership, missing upstream artifacts, failed verification, or Git isolation. Narrow and re-triage a `hard` or high-risk issue before repair; plan approval alone cannot bypass that gate.
 
@@ -34,21 +34,23 @@ Do not repair any issue without `fix_approved(issue)`. Resolve every concrete bl
 Use the runner to keep fix-one work resumable:
 
 ```powershell
-python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix --completion-action resolve-for-acceptance
-python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix --completion-action resolve-for-acceptance --approved <plan_fingerprint>
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-123 --files src/file.ts --completion-action commit --completion-action start-fix --approved <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-123 --summary "..." --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123 --verified-by agent --verification-note "local run" --check "lint=passed: pnpm exec eslint src/file.ts" --browser passed --browser-note "Route checked"
 python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-123 --files src/file.ts --authorized <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-123 --summary "Fixed locally and verified"
 ```
 
-Run `plan-fix` without `--approved` first. It prints a `plan_fingerprint` bound to the issue, triage result, files, route, verification mode, notes, and completion actions. Show that exact plan to the user. After approval, rerun with identical arguments plus `--approved <plan_fingerprint>`. Approval covers only the listed actions, but those actions may run consecutively without asking again after the fix.
+Run `plan-fix` without `--approved` first. It prints a `plan_fingerprint` bound to the issue, triage result, files, route, verification mode, notes, and completion actions. If the user only requested planning, show the exact plan and wait. If a direct single/batch repair request already authorizes this issue, mode, and default action set, immediately rerun with identical arguments plus `--approved <plan_fingerprint>`; this records the current run authorization and is not a second user confirmation. Ask again only when the plan exceeds that scope.
 
 Record implementation only for the exact literal files listed in the approved plan. If code search changes the file scope, regenerate the plan and obtain approval for the new fingerprint before editing those files.
 
 ## Start Work
 
-Move the issue to in-progress only when `completion_action_authorized(issue, start-fix)` is true: `start-fix` is in the approved plan, project policy allows it, the local deny-only override does not disable it, and the target status id is verified. Otherwise, mention that no status change was made.
+In `autonomous` mode, keep the remote issue unchanged during edits and verification. Run `start-fix` only after verification and the issue-specific commit both succeed, and only when `completion_action_authorized(issue, start-fix)` is true: `start-fix` is in the approved plan, project policy allows it, the local deny-only override does not disable it, and the target status id is verified. `修复中` is the final status of this repair run.
+
+In `assisted` mode, keep the remote issue in its original state during modification and commit. Execute its plan-listed `start-fix` only after the user directly reports that issue passed manual verification. If manual verification fails, keep the original remote state and repair again.
 
 If the status update fails, continue only when local repair is still useful and report the failure.
 
@@ -103,13 +105,27 @@ python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-123
 
 Never use lightweight mode for high-risk, cross-owner, backend-owned, unclear, destructive, auth/payment/data-loss, or failed fixes.
 
+### Deferred-to-user mode
+
+Use `--verification-mode deferred-to-user` only for the explicitly requested `assisted` workflow:
+
+- Keep the same evidence, report-quality, ownership, effort, and risk repair gates.
+- Do not run AI repair verification, tests, builds, browser checks, or lightweight diff/contract inspection. Run only mandatory low-cost formatting required by repository instructions, and do not count it as Bug verification.
+- Keep the Feishu issue in its original status while editing.
+- Record implementation and create a plan-bound commit with `verification_pending: true` only when `execution_policy.allow_deferred_user_verification` is true.
+- After direct user feedback, record at least one concrete result with `--mode deferred-to-user --verified-by user`.
+- On pass, execute the already-authorized `start-fix` transition and record the local handoff. Do not automatically execute `resolve-for-acceptance`.
+- On failure, keep the remote status unchanged and return the issue to a new scoped repair iteration.
+
+Never let an agent or CI identity mark this mode done on the user's behalf.
+
 After verification, run `record-verification`. Mark failed or blocked verification explicitly with `--failed`, `--blocked`, or `--browser failed/blocked`.
 
-Bind verification to the current implementation content fingerprint. If the implementation or any upstream artifact changes, invalidate verification and rerun it before commit or closure.
+Bind verification to the current implementation content fingerprint. If the implementation or any upstream artifact changes, invalidate verification. Autonomous mode must rerun verification before commit or closure; assisted mode may keep the already-created issue commit but must wait for a new user result before status handoff or local closure.
 
 ## Git Isolation And Local Commit
 
-Create one local commit when `commit` appears in the approved plan and the current standard or lightweight verification artifact is `done`:
+Create one local commit when `commit` appears in the approved plan. Require a current `done` standard/lightweight verification artifact in autonomous mode. In assisted mode, permit a pre-verification commit only when the plan declares `deferred-to-user` and project policy enables it:
 
 ```powershell
 python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-123 --files src/file.ts src/file.scss --authorized <plan_fingerprint>
@@ -127,7 +143,7 @@ Rules:
 - Do not push; the runner does not implement push.
 - Use the configured `git_policy.commit_message_template`, defaulting to `fix({issue}): {title}`.
 - Always pass the approved plan's `--authorized <plan_fingerprint>`. This reuses the plan authorization and does not require a second confirmation.
-- The runner has no force bypass. Regenerate stale artifacts and complete the plan-approved standard or lightweight verification before committing.
+- The runner has no force bypass. Regenerate stale artifacts and complete standard/lightweight verification before autonomous commits. Treat `deferred-to-user` as the only explicit pre-verification commit path and report it as pending.
 
 ## Browser Verification
 
@@ -142,7 +158,7 @@ Verify the route or workflow from the issue:
 5. Confirm the fixed behavior.
 6. Capture screenshots or a concise evidence note when useful.
 
-Browser verification is mandatory for styles, tables, modals, drawers, upload, rich text, routing, and visible interaction bugs unless the approved plan uses a valid lightweight exception with a concrete reason and residual risk.
+Browser verification is mandatory for styles, tables, modals, drawers, upload, rich text, routing, and visible interaction bugs in autonomous mode unless the approved plan uses a valid lightweight exception. Assisted mode deliberately defers that check to the user and must not claim the UI was verified.
 
 ## Remote Closure
 
@@ -163,13 +179,15 @@ Mention mock-only or local-only verification clearly.
 
 ## Finish Status
 
-Move the issue to resolved-for-acceptance, completed, or terminated only when:
+In autonomous mode, move the issue to resolved-for-acceptance, completed, or terminated only when:
 
 - standard verification passed, or plan-approved lightweight verification is `done`,
 - browser verification passed when required and not validly exempted by lightweight mode,
 - `completion_action_authorized(issue, exact_transition)` is true.
 
 If verification is partial, leave the issue in progress and comment with the remaining risk.
+
+In both modes, the normal repair handoff ends at `修复中`. Do not move an issue to resolved-for-acceptance, completed, or terminated unless the user separately requests that later post-acceptance workflow for exact issue ids.
 
 Use `close-local` only after current `verification.md` is `done`. Use `--allow-partial` only when the user explicitly approved partial local closure, the final answer clearly states verification is partial, and no remote resolved/completed transition was made.
 

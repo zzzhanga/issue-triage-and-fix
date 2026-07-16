@@ -2,6 +2,8 @@
 
 当用户希望每天、每周或定时执行缺陷分诊时，可以把本技能配置为 Codex“已安排”任务。
 
+一次交互任务中的 `autonomous` 无人值守修复只授权当前扫描快照，不等于持久化定时授权。已安排任务仍默认只读 preview；只有用户明确要求创建“定时自动修复”并单独定义工单范围、模式、动作包、失败策略和有效期时，才评估扩展，不能复用某次交互运行授权。
+
 ## 触发规则
 
 - 用户明确要求创建、更新、查看或删除已安排任务时，使用 Codex 自动化工具处理。
@@ -22,6 +24,7 @@
 
 - 使用 `$issue-triage-and-fix`。
 - 读取 `AGENTS.md` 和 `.codex/bugflow/` 下的项目配置。
+- 实时飞书任务先按工具 schema/动作语义确认当前客户端已暴露等价的 `search_by_mql` 查询能力；缺失、未认证、等待客户端批准或首次连接超时时立即报告并停止，不安装、不重配、不反复探测 MCP。导出 JSON 任务跳过此检查。
 - 复用项目已配置且曾通过检查的 Python 3 解释器，直接运行 `bugflow_runner.py doctor`；只有首次配置或明确报依赖缺失时才安装 `requirements.txt`，不要每次日报重复安装。报告 warn/error，有 error 时停止。
 - 区分 `doctor` 的本地 `field-mapping` 与 `remote-field-verification`；不要把映射存在误当成远端字段已验证，也不要每次做全量字段发现。
 - 使用 `bugflow_runner.py feishu-mql --profile preview --json` 从配置生成本次最小 SELECT；可选字段只取 `field_verification.verified_keys` 中已确认的 key。
@@ -61,12 +64,13 @@
 
 定时分诊应优先走快路径，避免把一次日报变成探索式会话：
 
-1. 用已解析并完成依赖检查的 Python 3 解释器跑 `doctor`。
-2. 用 `feishu-mql --profile preview --json` 生成本次最小查询。
-3. 用 MCP 查本次待处理 issue 候选列表。
-4. 保留列表字段、已有描述摘要和附件元数据；仅在某条初筛离不开一个易取得的关键摘要/证据时补取。不要默认 full detail、分页评论、活动记录或媒体下载。
-5. 运行 `bugflow_runner.py preview --input <json> --report .bugflow/reports/daily-preview.md`；它只做内存标准化、当前负责人过滤和初步分类，不生成 `issue.json` 或其他逐工单工件。
-6. 输出暂定日报；疑似信息不足只写“升级后需核对项”，不运行 `report-quality-hash`，不生成声称已核对资料的反馈草稿。
+1. 对实时飞书确认当前客户端已有等价 MQL 查询能力；失败即快速停止，导出 JSON 跳过。
+2. 用已解析并完成依赖检查的 Python 3 解释器跑 `doctor`。
+3. 用 `feishu-mql --profile preview --json` 生成本次最小查询。
+4. 用 MCP 查本次待处理 issue 候选列表。
+5. 保留列表字段、已有描述摘要和附件元数据；仅在某条初筛离不开一个易取得的关键摘要/证据时补取。不要默认 full detail、分页评论、活动记录或媒体下载。
+6. 运行 `bugflow_runner.py preview --input <json> --report .bugflow/reports/daily-preview.md`；它只做内存标准化、当前负责人过滤和初步分类，不生成 `issue.json` 或其他逐工单工件。
+7. 输出暂定日报；疑似信息不足只写“升级后需核对项”，不运行 `report-quality-hash`，不生成声称已核对资料的反馈草稿。
 
 定时任务必须使用 `feishu-mql` 生成的 `current_login_user()` 负责人过滤结果；不要把全项目 JSON 当作“我的工单”导入。非飞书导出任务必须配置当前用户并向 `preview` 传 `--assignee <name-or-id>`。
 

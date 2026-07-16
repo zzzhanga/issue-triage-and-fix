@@ -18,8 +18,8 @@ Use this reference before changing a remote issue status.
 ## Defaults
 
 - Do not post repair/closure comments or change remote status unless `completion_action_authorized(issue, action)` is true. Report-quality clarification comments use the separate exact-draft rules below.
-- Treat code repair, local commit, comment, start-fix, resolve, complete, reopen, and terminate as distinct actions, but allow one exact fix-plan approval to cover several actions when every action is visibly listed in `completion_actions`.
-- In the Feishu starter, enable status updates plus the normal `start_fix` and `resolve_for_acceptance` capabilities. Keep comments, complete, and terminate disabled. This permits an approved repair workflow; it does not authorize or automatically execute a transition.
+- Treat code repair, local commit, comment, start-fix, resolve, complete, reopen, and terminate as distinct actions, but allow one direct single/batch repair request to authorize the selected mode's default action bundle for its frozen issue scope. Keep every issue bound to its own `completion_actions` and plan fingerprint.
+- In the Feishu starter, enable status updates plus `start_fix` and `resolve_for_acceptance` as capability gates. Neither repair mode includes resolve in its default bundle: autonomous uses `commit -> start-fix`, while assisted uses `commit -> direct user verification -> start-fix`. Keep comments, complete, and terminate disabled.
 - Keep every remote capability false for exported-JSON/non-native tracker starters.
 - Never transition blocked, unclear, or cross-owner issues as if they were repaired.
 - Treat a report-quality clarification draft as local-only by default. Do not post it merely because comments were read, a repair plan was approved, or comments are enabled.
@@ -29,13 +29,13 @@ Use this reference before changing a remote issue status.
 
 `completion_action_authorized(issue, action)` is true only when all of these are true:
 
-1. The user approves the exact fix plan and the action is explicitly listed in that plan's `completion_actions`. An action not listed in the approved plan requires a new plan/approval.
+1. The user directly names the issue, starts a batch repair run whose frozen scope contains it, or approves the exact fix plan; the action must also be explicitly listed in that issue plan's `completion_actions`. An action outside the selected mode's default bundle requires a new plan/approval.
 2. Repo-scoped project config enables status updates or comments as appropriate and enables the specific default action. The Feishu starter enables only `start_fix` and `resolve_for_acceptance` status actions.
 3. A local deny-only override does not set the capability or action to `false`.
 4. For status changes, the named transition exists, its source matches, and its target status id/code was verified from tracker field config.
 5. Any transition-specific confirmation and verification prerequisites are satisfied.
 
-Configuration alone is not user approval. A local `true` cannot override a project `false`, and plan approval cannot silently persist into later tasks. After approval, do not ask again between implementation, plan-approved verification, commit, and the listed normal status transitions.
+Configuration alone is not user approval. A local `true` cannot override a project `false`, and current-run authorization cannot silently expand into later tasks or newly arriving issues. The plan fingerprint records the already-granted run authorization; do not ask again for each issue/action while it stays inside the frozen scope, mode, and bundle.
 
 ## Report-Quality Clarification Comments
 
@@ -86,17 +86,24 @@ Allowed only when:
 - transition `start_fix` exists,
 - the verified source and target states match the transition.
 
-If allowed, update from open/pending to in-progress before code edits.
+In autonomous mode, keep the source status unchanged during edits and AI verification. After verification passes and the issue-specific commit succeeds, re-read the current remote state and update from open/pending to in-progress. If commit fails, do not run `start-fix`. The resulting in-progress state is the final remote state for this repair run.
+
+In assisted mode, do not update before edits or commit. Require a `deferred-to-user` verification artifact with `verified_by: user`, `human_verified: true`, and a concrete passed result; only then run the already planned `start-fix`. If the user reports failure, keep the source status unchanged.
 
 ## Resolve For Acceptance
 
-Allowed only when:
+Never execute this transition as part of the normal autonomous or assisted repair bundle. It is a separate post-acceptance action after later human verification. If the user wants AI to perform it, require all of:
 
+- the user explicitly identifies the accepted issue(s) and requests this transition in the current task,
+- the current source status is re-read and is the expected in-progress state,
+- the issue-specific implementation commit still exists and matches the recorded implementation,
 - standard verification passed, or the approved lightweight verification artifact is `done`,
 - browser verification passed when required and not validly exempted by lightweight mode,
 - transition `resolve_for_acceptance` exists,
 - the transition target is `已解决，待验收` or equivalent,
-- plan action `resolve-for-acceptance` is authorized and maps to transition `resolve_for_acceptance`.
+- a new plan/action authorization lists `resolve-for-acceptance` and maps to transition `resolve_for_acceptance`.
+
+The user may instead update Feishu manually after acceptance. Do not infer this action from the earlier repair request, its batch authorization, or the fact that the issue is already `修复中`.
 
 Legacy configs may use `default_change_to_fixed`; treat it as an alias for `default_resolve_for_acceptance`.
 

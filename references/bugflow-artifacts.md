@@ -47,7 +47,7 @@ Fix-ready artifacts:
 | `triage-report` | `triage.md` | Evidence/report quality, ownership, effort, readiness, risk, recommended order, and any local unpublished feedback draft. |
 | `fix-plan` | `fix-plan.md` | Scoped implementation plan, verification mode, and approved completion actions before code edits; hard evidence/ownership/risk blockers produce only a planning diagnostic with no fingerprint or implementation steps. |
 | `implementation` | `implementation.md` | Files changed, key decisions, remote status changes, and notes while editing. |
-| `verification` | `verification.md` | Standard checks or plan-approved lightweight inspection evidence, browser results, residual risk, and failures. |
+| `verification` | `verification.md` | Standard checks, plan-approved lightweight inspection, or direct user results for a `deferred-to-user` assisted plan; includes provenance, residual risk, and failures. |
 | `closure` | `closure.md` | Comment text, final status decision, residual risk, and follow-up. |
 
 ## Status Model
@@ -105,7 +105,7 @@ issue-intake
   -> closure
 ```
 
-This dependency chain begins only after a selected issue enters fix-ready. Use dependencies as hard gates for plan approval, implementation, verification, commit, closure, and remote actions. User approval does not make a missing or stale upstream artifact complete; regenerate it first.
+This dependency chain begins only after a selected issue enters fix-ready. Use dependencies as hard gates for plan approval, implementation, verification, closure, and remote actions. Autonomous commits also require verification. The only commit exception is an approved `deferred-to-user` assisted plan with project permission; record it as verification pending and keep the remote issue unchanged. User approval does not make a missing or stale upstream artifact complete; regenerate it first.
 
 When an upstream artifact changes materially, invalidate every descendant. The runner performs this check when refreshed normalized issue content changes; for manually edited Markdown artifacts, explicitly reset downstream status before continuing:
 
@@ -133,7 +133,7 @@ The migrator may add the current hash/schema metadata only when the stored asses
 - Keep screenshots local unless the repo policy allows committing them.
 - Keep downloaded evidence under `.bugflow/issues/<safe-issue-key>/evidence/` (or another ignored local directory). Store only safe relative paths, hashes, inspection state, and summaries in `issue.json`; never store temporary download `sign`, signed URLs, or authorization headers.
 - Do not mark evidence complete after seeing only an attachment name, thumbnail, or video cover frame. If decision-relevant media cannot be inspected, keep triage blocked/provisional.
-- Do not treat `evidence_fetch.status: complete` as proof that the report is sufficient. Require `report_quality.status: sufficient`; otherwise keep repair and standard/lightweight verification blocked and include exact clarification questions.
+- Do not treat `evidence_fetch.status: complete` as proof that the report is sufficient. Require `report_quality.status: sufficient`; otherwise keep repair and all three verification modes blocked and include exact clarification questions.
 - Preview never claims either gate is complete. Suspected missing information in preview is an internal “upgrade and inspect” note, not a bound report-quality verdict or ready-to-publish feedback draft.
 - When evidence, report quality, repository ownership, confirmation, effort, or risk has a hard blocker, `plan-fix` may record a blocked diagnostic in `fix-plan.md` for auditability, but it must not emit an approvable fingerprint, implementation steps, verification plan, or completion actions. This diagnostic is not a repair plan.
 - Do not mark `closure.md` done until verification and remote workflow decisions are recorded.
@@ -159,12 +159,12 @@ python <skill-dir>\scripts\bugflow_runner.py fetch-json --input selected-issue.j
 python <skill-dir>\scripts\bugflow_runner.py report-quality-hash --issue BUG-28814
 python <skill-dir>\scripts\bugflow_runner.py triage --issue BUG-28814
 python <skill-dir>\scripts\bugflow_runner.py daily-existing --issue BUG-28814 --assignee <current-user-name-or-id> --report .bugflow/reports/daily-report.md
-python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action resolve-for-acceptance
-python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action resolve-for-acceptance --approved <plan_fingerprint>
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action start-fix
+python <skill-dir>\scripts\bugflow_runner.py plan-fix --issue BUG-28814 --files src/file.ts --completion-action commit --completion-action start-fix --approved <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py record-implementation --issue BUG-28814 --summary "..." --files src/file.ts
 python <skill-dir>\scripts\bugflow_runner.py record-verification --issue BUG-28814 --verified-by agent --check "lint=passed: pnpm exec eslint src/file.ts"
 python <skill-dir>\scripts\bugflow_runner.py commit-fix --issue BUG-28814 --files src/file.ts --authorized <plan_fingerprint>
 python <skill-dir>\scripts\bugflow_runner.py close-local --issue BUG-28814 --summary "Fixed locally and verified"
 ```
 
-The runner creates starter config with `init-project`, checks local setup with `doctor`, generates Feishu MQL from config with `feishu-mql`, and filters input to the current assignee by default. `preview` performs an in-memory scan without issue artifacts. For selected fix-ready issues, the runner creates or updates artifacts, keeps evidence completeness separate from report sufficiency, performs deterministic requirement-to-repository matching, records plan-approved standard/lightweight verification, and can create one local commit after verification and Git isolation checks. `daily-existing` renders a report only from explicitly listed, already assessed issue artifacts; use it after strict evaluation so a second `daily --input` import cannot overwrite enriched evidence/report-quality data. The runner does not edit code, publish clarification drafts, push, or update remote issue status.
+The runner creates starter config with `init-project`, checks local setup with `doctor`, generates Feishu MQL from config with `feishu-mql`, and filters input to the current assignee by default. `preview` performs an in-memory scan without issue artifacts. For selected fix-ready issues, the runner creates or updates artifacts, keeps evidence completeness separate from report sufficiency, performs deterministic requirement-to-repository matching, records standard/lightweight/direct-user verification, and can create one isolated local commit. Autonomous commits require verification; assisted `deferred-to-user` commits may precede it only under the explicit policy gate. `daily-existing` renders a report only from explicitly listed, already assessed issue artifacts; use it after strict evaluation so a second `daily --input` import cannot overwrite enriched evidence/report-quality data. The runner does not edit code, publish clarification drafts, push, or update remote issue status.

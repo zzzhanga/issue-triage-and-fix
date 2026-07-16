@@ -15,7 +15,7 @@ Do not confuse these checks:
 - `evidence_fetch` answers whether full detail, comments, activities, and decision-relevant attachments were actually retrieved and inspected.
 - `report_quality` answers whether the combined evidence now states a testable implementation target and acceptance boundary.
 
-`evidence_fetch.status: complete` does not imply `report_quality.status: sufficient`. Run both gates. A repair plan, standard/lightweight implementation, commit, or remote repair transition requires both evidence completeness and sufficient report quality.
+`evidence_fetch.status: complete` does not imply `report_quality.status: sufficient`. Run both gates. A repair plan, any verification mode, implementation, commit, or remote repair transition requires both evidence completeness and sufficient report quality.
 
 ## Sufficient Content
 
@@ -104,7 +104,7 @@ For `needs-clarification` or `conflicting`:
 
 Generate a ready-to-send draft only after `evidence_fetch` is complete and the assessment hash matches. While evidence is `partial|error`, suppress any explicit draft and report `blocked-by-evidence`; do not claim that all details, comments, or attachments were reviewed. A stale or unbound assessment is `blocked-by-assessment` and must not produce an external draft.
 
-Do not create a repair fingerprint, enter implementation, or use lightweight verification while report quality is not `sufficient`. User approval cannot bypass this gate.
+Do not create a repair fingerprint, enter implementation, or use lightweight/deferred-to-user verification while report quality is not `sufficient`. User approval cannot bypass this gate.
 
 Publishing the clarification to Feishu is a separate external write. Require explicit current-task authorization for the exact draft and an enabled comment capability. Do not reuse a fix-plan approval, and never auto-publish clarification drafts from scheduled triage.
 

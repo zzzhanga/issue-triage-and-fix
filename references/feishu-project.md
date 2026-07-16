@@ -6,6 +6,8 @@ Use this reference when `issue_source.platform` is `feishu-project` or the user 
 
 - [URL Parsing](#url-parsing)
 - [Access Order](#access-order)
+- [Runtime Preflight](#runtime-preflight)
+- [Client Setup](#client-setup)
 - [Field Discovery](#field-discovery)
 - [Common Feishu Fields](#common-feishu-fields)
 - [Generate MQL From Config](#generate-mql-from-config)
@@ -33,11 +35,30 @@ If the URL is missing a project key or work item type, use repo-scoped project c
 
 ## Access Order
 
-1. Use an available Feishu Project MCP server.
+1. Use an already configured Feishu Project MCP server exposed by the current client.
 2. Use a project-approved OpenAPI script or SDK with credentials from environment variables.
 3. Use browser automation only for one-off extraction after user authorization.
 
-Do not ask for a password. Do not store tokens, cookies, MCP URLs, or user keys in the repository.
+Do not ask for a password. Do not store tokens, cookies, secret-bearing/personal MCP URLs, or user keys in the repository. The fixed public endpoint may appear in client connection metadata, but authentication remains per-user and outside the skill.
+
+## Runtime Preflight
+
+Run this preflight only for live Feishu access. Exported JSON does not require MCP. Match tools by their schema and action semantics rather than an exact client-generated prefix; for example, Codex may expose `mcp__feishu_project__search_by_mql` while another client shows only the server and tool display names.
+
+| Stage | Required capability |
+| --- | --- |
+| Preview | `search_by_mql` or an equivalent bounded MQL query tool |
+| Exact field verification | `list_workitem_field_config` or an equivalent exact field-schema tool |
+| Fix-ready evidence | full detail, paginated comments, relevant operation/activity records, and decision-related file download |
+| Status transition | current/transitable status lookup plus the exact state-transition action |
+
+Check only the current stage. Missing write tools must not block read-only Preview; missing fix-ready evidence tools must produce `partial|error` and block repair rather than trigger setup loops.
+
+If no compatible query tool is visible, or the first connection reports missing credentials, `401/403`, startup timeout, pending client/workspace approval, or a missing environment variable, stop and report the exact client-visible state. Do not install packages, edit MCP configuration, rediscover all tools, or retry authentication unless the user explicitly asked to configure the connection. A client may perform one built-in reconnect/auth refresh; do not add an agent-level retry loop on top of it.
+
+## Client Setup
+
+Read `mcp-client-setup.md` only when the user asks to configure the live connection or the preflight fails. It contains separate Codex, Cursor, Claude Code, and generic MCP-client examples. Never copy configuration syntax from one client into another unchanged.
 
 ## Field Discovery
 
@@ -181,8 +202,8 @@ Before changing status:
 
 Default safe behavior:
 
-- Moving `待修复` to `修复中`: require plan action `start-fix`, effective project/local permission, an enabled transition, and a verified target status id.
-- Moving to `已解决，待验收`, `已完成`, or `已终止`: require the matching plan action and satisfy verification/acceptance prerequisites. Several actions may share one exact plan approval.
+- Moving `待修复` to `修复中`: require plan action `start-fix`, effective project/local permission, an enabled transition, and a verified target status id. Autonomous mode runs it only after AI verification and commit; assisted mode runs it only after commit and direct user verification. `修复中` is the final state of the normal repair run.
+- Moving to `已解决，待验收`, `已完成`, or `已终止`: never infer this from either repair mode. Require a separate explicit request for exact issue ids, re-read the current state, and satisfy the matching verification/acceptance prerequisites. Manual post-acceptance updates are also valid.
 
 ## Comments
 

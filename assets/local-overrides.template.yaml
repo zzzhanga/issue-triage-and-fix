@@ -49,6 +49,7 @@ login_policy:
 #   auto_fix_allowed: false
 #   auto_fix_low_risk_frontend: false
 #   allow_lightweight_verification: false
+#   allow_deferred_user_verification: false
 #
 # git_policy:
 #   auto_commit_after_fix: false

@@ -28,7 +28,7 @@ Merge ordinary descriptive values from earlier to later layers. Merge capability
 
 - Treat a project-level `false` as denied.
 - Let a local override change `true` to `false`, never `false` to `true`.
-- Require approval of an exact plan in addition to configuration. That single plan may authorize several visibly listed completion actions; unlisted actions remain unauthorized.
+- Require an explicit single/batch repair request or approval of an exact plan in addition to configuration. Bind current-run authorization to each issue's exact plan; unlisted or out-of-mode actions remain unauthorized.
 - Do not interpret a missing key as permission.
 
 Preferred local-only repo-scoped project config paths:
@@ -229,7 +229,9 @@ Resolve placeholders before running. If a command is not applicable, record a st
 
 Standard verification is plan-bound: `plan-fix` derives `required_checks` from the changed file types, configured test/build policy, browser route, and visible issue signals. Every named requirement must be `passed`; an unrelated passed command cannot satisfy lint/test/build/browser. `record-verification` also requires `--verified-by user|agent|ci`, records UTC time automatically, and accepts a concise `--verification-note`. Plan-approved lightweight verification may finish without an automated pass only when the runner confirms high-confidence current-repo frontend ownership, low/medium risk, easy/medium effort, no unresolved confirmation, a concrete automation-exemption reason, and inspection evidence. Keep `execution_policy.allow_lightweight_verification: true` to enable this path; a local `false` is a hard deny.
 
-Use `execution_policy.approved_completion_actions` to populate actions shown in a new fix plan by default. The Feishu starter uses `commit`, `start-fix`, and `resolve-for-acceptance`; the exported-JSON starter uses only `commit` because it has no native remote adapter. The actions are not authorized until the exact plan is approved.
+`deferred-to-user` is separate from lightweight verification. Enable it with `execution_policy.allow_deferred_user_verification: true` only when the team accepts plan-bound commits before manual verification. It skips AI repair verification, keeps Feishu unchanged during edits, and only accepts a direct `verified_by: user` result. After a pass, assisted mode may execute its delayed `start-fix`; it does not resolve the issue for acceptance.
+
+Use `execution_policy.default_repair_mode` when user wording does not choose a mode. `approved_completion_actions` supplies the autonomous bundle: the Feishu starter uses `commit` then `start-fix`; exported JSON uses only `commit`. `assisted_completion_actions` supplies the human-verification bundle: Feishu uses `commit` and delayed `start-fix`, while exported JSON uses only `commit`. Neither bundle includes `resolve-for-acceptance`; the runner also filters this action out of legacy default bundles unless it is explicitly requested in a new plan. A direct single/batch repair request authorizes the matching bundle for its frozen scope; the runner still records an exact plan fingerprint for every issue.
 
 ## Remote And Git Policy
 
@@ -245,7 +247,7 @@ remote_status_policy:
   default_terminate: false
 ```
 
-The exported-JSON starter keeps every remote capability false because it has no native remote adapter. For Feishu, enabled capability flags still require approval of an exact plan that lists the transition, verified target status ids/transitions, and no local deny. Once that plan is approved, execute its listed completion actions consecutively without a second confirmation.
+The exported-JSON starter keeps every remote capability false because it has no native remote adapter. For Feishu, enabled capability flags still require a current-run or exact-plan authorization, a plan that lists the transition, verified target status ids/transitions, and no local deny. Autonomous mode holds `start-fix` until AI verification and commit succeed; assisted mode holds it until commit and direct user verification succeed. The legacy-named `default_resolve_for_acceptance` field is only a capability gate for a separately authorized post-acceptance action, not a default repair action.
 
 Use `git_policy` to control local commits after a verified fix:
 
@@ -258,10 +260,10 @@ git_policy:
   commit_message_template: "fix({issue}): {title}"
 ```
 
-Keep `auto_commit_after_fix` and `push_after_commit` false by default. A local commit requires `commit` in the approved plan, current standard/lightweight verification, and the matching plan fingerprint passed to `commit-fix`. Abort if the index already contains staged changes; do not mix user-staged files into an automated commit. Accept only literal fix-related file paths, never `.`, a directory, a glob, or a path outside the repository.
+Keep `auto_commit_after_fix` and `push_after_commit` false by default. Every local commit requires `commit` in the approved plan and the matching plan fingerprint passed to `commit-fix`. Autonomous mode also requires current standard/lightweight verification. Assisted mode may commit with `verification_pending: true` only under an approved `deferred-to-user` plan and `allow_deferred_user_verification: true`. Abort if the index already contains staged changes; do not mix user-staged files into an automated commit. Accept only literal fix-related file paths, never `.`, a directory, a glob, or a path outside the repository.
 
 ## Project Overrides
 
-Repo-scoped project config may enable a capability only through an intentional reviewed change; doing so still does not replace approval of an exact plan that visibly lists each completion action.
+Repo-scoped project config may enable a capability only through an intentional reviewed change; doing so does not replace a direct single/batch repair request or approval of an exact plan that visibly lists each completion action.
 
 Local overrides may make automation stricter for a user, but must never make repair, commit, push, comments, or remote workflow changes more permissive than the repo-scoped project config.

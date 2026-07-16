@@ -91,6 +91,73 @@ def current_triage_metadata(
     return metadata
 
 
+class DistributionHygieneTests(unittest.TestCase):
+    def test_skill_description_uses_trigger_focused_use_when_form(self) -> None:
+        skill_text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        match = re.search(r"(?m)^description:\s*(.+)$", skill_text)
+
+        self.assertIsNotNone(match)
+        self.assertTrue(match.group(1).startswith("Use when "))
+
+    def test_generic_runtime_files_do_not_embed_numeric_custom_field_ids(self) -> None:
+        public_runtime_files = (
+            SKILL_ROOT / "assets" / "feishu-project-config.template.yaml",
+            SKILL_ROOT / "scripts" / "normalize_issue_payload.py",
+        )
+
+        for path in public_runtime_files:
+            with self.subTest(path=path.name):
+                self.assertNotRegex(
+                    path.read_text(encoding="utf-8"),
+                    r"(?<!_)\bfield_(?=[a-z0-9]*\d)[a-z0-9]{6,}\b",
+                )
+
+    def test_local_quality_caches_are_ignored(self) -> None:
+        ignored = set(
+            (SKILL_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+        )
+
+        self.assertIn(".ruff_cache/", ignored)
+
+    def test_codex_metadata_declares_non_secret_feishu_mcp_dependency(self) -> None:
+        metadata = runner.load_yaml(SKILL_ROOT / "agents" / "openai.yaml")
+        dependencies = metadata.get("dependencies", {}).get("tools", [])
+
+        self.assertIn(
+            {
+                "type": "mcp",
+                "value": "feishu-project",
+                "description": "飞书 Project MCP 服务；每位用户单独配置 X-Mcp-Token",
+                "transport": "streamable_http",
+                "url": "https://project.feishu.cn/mcp_server/v1",
+            },
+            dependencies,
+        )
+        serialized = json.dumps(metadata, ensure_ascii=False)
+        self.assertNotIn("http_headers", serialized)
+        self.assertNotRegex(serialized, r"m-[0-9a-f]{8}-[0-9a-f-]{20,}")
+
+    def test_mcp_setup_reference_covers_supported_clients_without_plaintext_token(self) -> None:
+        setup = (SKILL_ROOT / "references" / "mcp-client-setup.md").read_text(
+            encoding="utf-8"
+        )
+
+        for client in ("Codex", "Cursor", "Claude Code", "Other MCP Clients"):
+            with self.subTest(client=client):
+                self.assertIn(f"## {client}", setup)
+        self.assertIn("${env:FEISHU_PROJECT_MCP_TOKEN}", setup)
+        self.assertIn("${FEISHU_PROJECT_MCP_TOKEN}", setup)
+        self.assertIn('env_http_headers = { "X-Mcp-Token"', setup)
+        self.assertNotRegex(setup, r"m-[0-9a-f]{8}-[0-9a-f-]{20,}")
+
+    def test_live_feishu_preflight_fails_fast_without_reconfiguring_mcp(self) -> None:
+        skill_text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+
+        self.assertIn("导出 JSON 不要求 MCP", skill_text)
+        self.assertIn("不得自行安装、重配、反复探测 MCP", skill_text)
+        self.assertIn("按工具 schema 和动作语义匹配", skill_text)
+
+
 class ConfigSafetyTests(unittest.TestCase):
     def test_local_override_cannot_turn_project_false_permissions_true(self) -> None:
         project = {
@@ -180,7 +247,7 @@ class ConfigSafetyTests(unittest.TestCase):
 
 
 class SkillTemplatePolicyTests(unittest.TestCase):
-    def test_feishu_starter_enables_only_normal_repair_status_transitions(self) -> None:
+    def test_feishu_starter_keeps_resolve_as_capability_but_not_default_action(self) -> None:
         config = runner.load_yaml(SKILL_ROOT / "assets/feishu-project-config.template.yaml")
         policy = config["remote_status_policy"]
 
@@ -204,7 +271,7 @@ class SkillTemplatePolicyTests(unittest.TestCase):
         self.assertIs(feishu["execution_policy"]["allow_lightweight_verification"], True)
         self.assertEqual(
             feishu["execution_policy"]["approved_completion_actions"],
-            ["commit", "start-fix", "resolve-for-acceptance"],
+            ["commit", "start-fix"],
         )
         self.assertIs(exported["execution_policy"]["allow_lightweight_verification"], True)
         self.assertEqual(exported["execution_policy"]["approved_completion_actions"], ["commit"])
@@ -948,12 +1015,12 @@ class TriageAndRepairGateTests(unittest.TestCase):
 
 class AssigneeFilterTests(unittest.TestCase):
     def test_exported_json_defaults_to_current_assignee_only(self) -> None:
-        config = {"query_policy": {"assigned_to": "zhanghang", "assignee_aliases": ["user-7"]}}
+        config = {"query_policy": {"assigned_to": "current-user", "assignee_aliases": ["user-7"]}}
         args = argparse.Namespace(assignee=None, include_all_assignees=False)
         tokens, mode = runner.import_assignee_filter(config, args, "jira")
         included, summary = runner.filter_imported_issues(
             [
-                {"number": "BUG-1", "assignee": "ZhangHang"},
+                {"number": "BUG-1", "assignee": "current-user"},
                 {"number": "BUG-2", "assignee": ["someone-else"]},
                 {"number": "BUG-3", "assignee": ["user-7"]},
             ],
@@ -1011,7 +1078,7 @@ class PreviewWorkflowTests(unittest.TestCase):
             "project": {"name": "web-client", "role_assumption": "frontend"},
             "issue_source": {"platform": "jira"},
             "query_policy": {
-                "assigned_to": "zhanghang",
+                "assigned_to": "current-user",
                 "assignee_aliases": ["user-7"],
             },
             "requirement_mapping": {
@@ -1051,7 +1118,7 @@ class PreviewWorkflowTests(unittest.TestCase):
                 "key": "BUG-PREVIEW-1",
                 "title": "web client 按钮颜色不一致",
                 "description": "当前页按钮颜色与设计稿不一致。",
-                "assignee": "zhanghang",
+                "assignee": "current-user",
                 "requirements": [{"id": "REQ-1", "title": "web client"}],
             },
             {
@@ -1159,7 +1226,7 @@ class ExistingDailyWorkflowTests(unittest.TestCase):
                 "title": "web client 按钮颜色不一致",
                 "description": "只调整 web client 当前页面按钮的 CSS 颜色。",
                 "status": "待修复",
-                "assignee": "zhanghang",
+                "assignee": "current-user",
                 "requirements": [{"id": "REQ-1", "title": "web client"}],
                 "evidence_fetch": complete_evidence(),
                 "report_quality": sufficient_report_quality(
@@ -1184,7 +1251,7 @@ class ExistingDailyWorkflowTests(unittest.TestCase):
                 root=str(root),
                 issue=["BUG-SELECTED"],
                 report="",
-                assignee=["zhanghang"],
+                assignee=["current-user"],
                 include_all_assignees=False,
             )
 
@@ -1561,7 +1628,7 @@ class MqlSafetyTests(unittest.TestCase):
         return {
             "issue_source": {
                 "platform": "feishu-project",
-                "project_key": "ai-rays",
+                "project_key": "example-space",
                 "work_item_type": "issue",
                 "default_status": "OPEN",
             },
@@ -1584,13 +1651,13 @@ class MqlSafetyTests(unittest.TestCase):
     def test_valid_identifiers_and_order_build_expected_mql(self) -> None:
         result = runner.build_feishu_mql(self.config())
 
-        self.assertIn("FROM `ai-rays`.`issue`", result["mql"])
+        self.assertIn("FROM `example-space`.`issue`", result["mql"])
         self.assertIn("ORDER BY `updated_at` DESC", result["mql"])
         self.assertIn("LIMIT 20", result["mql"])
 
     def test_project_key_with_backtick_is_rejected(self) -> None:
         config = self.config()
-        config["issue_source"]["project_key"] = "ai-rays` UNION SELECT"
+        config["issue_source"]["project_key"] = "example-space` UNION SELECT"
 
         with self.assertRaises(SystemExit):
             runner.build_feishu_mql(config)
@@ -2129,7 +2196,9 @@ class GitCommitSafetyTests(unittest.TestCase):
                 "auto_fix_allowed": True,
                 "auto_fix_low_risk_frontend": True,
                 "allow_lightweight_verification": True,
+                "allow_deferred_user_verification": True,
                 "approved_completion_actions": ["commit"],
+                "assisted_completion_actions": ["commit", "start-fix"],
                 "max_auto_fix_effort": "medium",
             },
             "verification": {"test": "python -m unittest"},
@@ -2183,6 +2252,7 @@ class GitCommitSafetyTests(unittest.TestCase):
         config: dict[str, object],
         *,
         lightweight: bool = False,
+        deferred_to_user: bool = False,
     ) -> dict[str, object]:
         issue = self.workflow_issue()
         runner.write_issue_json(root, issue)
@@ -2194,9 +2264,13 @@ class GitCommitSafetyTests(unittest.TestCase):
             route="",
             notes="",
             verification_mode=(
-                runner.LIGHTWEIGHT_VERIFICATION_MODE
-                if lightweight
-                else runner.STANDARD_VERIFICATION_MODE
+                runner.DEFERRED_USER_VERIFICATION_MODE
+                if deferred_to_user
+                else (
+                    runner.LIGHTWEIGHT_VERIFICATION_MODE
+                    if lightweight
+                    else runner.STANDARD_VERIFICATION_MODE
+                )
             ),
             completion_action=None,
         )
@@ -2212,9 +2286,13 @@ class GitCommitSafetyTests(unittest.TestCase):
         verification_args = argparse.Namespace(
             **common,
             mode=(
-                runner.LIGHTWEIGHT_VERIFICATION_MODE
-                if lightweight
-                else runner.STANDARD_VERIFICATION_MODE
+                runner.DEFERRED_USER_VERIFICATION_MODE
+                if deferred_to_user
+                else (
+                    runner.LIGHTWEIGHT_VERIFICATION_MODE
+                    if lightweight
+                    else runner.STANDARD_VERIFICATION_MODE
+                )
             ),
             confidence="high" if lightweight else "",
             exemption_reason=(
@@ -2250,8 +2328,181 @@ class GitCommitSafetyTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(runner.plan_fix(plan_args), 0)
                 self.assertEqual(runner.record_implementation(implementation_args), 0)
-                self.assertEqual(runner.record_verification(verification_args), 0)
+                if not deferred_to_user:
+                    self.assertEqual(runner.record_verification(verification_args), 0)
         return issue
+
+    def test_assisted_plan_defers_checks_and_uses_human_handoff_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self.create_repo(repo)
+            root = repo / ".bugflow/issues"
+            config = self.workflow_config(root)
+            config["execution_policy"]["approved_completion_actions"] = [
+                "commit",
+                "start-fix",
+                "resolve-for-acceptance",
+            ]
+            with working_directory(repo):
+                self.prepare_verified_issue(root, config, deferred_to_user=True)
+                target = runner.issue_dir(root, "BUG-1")
+                metadata = runner.frontmatter_metadata(
+                    runner.artifact_path(target, "fix-plan")
+                )
+
+                self.assertEqual(
+                    metadata["verification_mode"],
+                    runner.DEFERRED_USER_VERIFICATION_MODE,
+                )
+                self.assertEqual(json.loads(metadata["required_checks"]), [])
+                self.assertEqual(
+                    set(json.loads(metadata["completion_actions"])),
+                    {"commit", "start-fix"},
+                )
+
+    def test_assisted_legacy_bundle_never_inherits_resolve_action(self) -> None:
+        config = {
+            "execution_policy": {
+                "approved_completion_actions": [
+                    "commit",
+                    "start-fix",
+                    "resolve-for-acceptance",
+                ]
+            }
+        }
+        args = argparse.Namespace(
+            completion_action=None,
+            verification_mode=runner.DEFERRED_USER_VERIFICATION_MODE,
+        )
+
+        self.assertEqual(
+            runner.normalize_completion_actions(config, args),
+            ["commit", "start-fix"],
+        )
+
+    def test_autonomous_legacy_bundle_never_inherits_resolve_action(self) -> None:
+        config = {
+            "execution_policy": {
+                "approved_completion_actions": [
+                    "commit",
+                    "start-fix",
+                    "resolve-for-acceptance",
+                ]
+            }
+        }
+        args = argparse.Namespace(
+            completion_action=None,
+            verification_mode=runner.STANDARD_VERIFICATION_MODE,
+        )
+
+        self.assertEqual(
+            runner.normalize_completion_actions(config, args),
+            ["commit", "start-fix"],
+        )
+
+    def test_assisted_mode_commits_before_user_verification(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            baseline = self.create_repo(repo)
+            root = repo / ".bugflow/issues"
+            config = self.workflow_config(root)
+            with working_directory(repo):
+                self.prepare_verified_issue(root, config, deferred_to_user=True)
+                (repo / "target.txt").write_text(
+                    "awaiting human verification\n", encoding="utf-8"
+                )
+
+                output = io.StringIO()
+                with mock.patch.object(
+                    runner, "load_config", return_value=config
+                ), contextlib.redirect_stdout(output):
+                    self.assertEqual(runner.commit_fix(self.commit_args(root)), 0)
+
+                result = json.loads(output.getvalue())
+                self.assertNotEqual(
+                    self.git(repo, "rev-parse", "HEAD").stdout.strip(), baseline
+                )
+                self.assertTrue(result["verification_pending"])
+                self.assertEqual(
+                    result["verification_mode"],
+                    runner.DEFERRED_USER_VERIFICATION_MODE,
+                )
+
+    def test_deferred_verification_requires_direct_user_confirmation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            self.create_repo(repo)
+            root = repo / ".bugflow/issues"
+            config = self.workflow_config(root)
+            with working_directory(repo):
+                self.prepare_verified_issue(root, config, deferred_to_user=True)
+                common = {
+                    "config": "unused",
+                    "local_config": "",
+                    "root": str(root),
+                    "issue": "BUG-1",
+                    "mode": runner.DEFERRED_USER_VERIFICATION_MODE,
+                    "confidence": "",
+                    "exemption_reason": "",
+                    "command": None,
+                    "check": ["acceptance=passed: 人工确认原问题已修复"],
+                    "browser": "not-required",
+                    "browser_note": "",
+                    "evidence": None,
+                    "residual_risk": "无",
+                    "verification_note": "用户在当前任务中确认验收通过。",
+                    "failed": False,
+                    "blocked": "",
+                }
+
+                with mock.patch.object(runner, "load_config", return_value=config):
+                    with self.assertRaises(SystemExit) as raised:
+                        runner.record_verification(
+                            argparse.Namespace(**common, verified_by="agent")
+                        )
+                    self.assertRegex(str(raised.exception).lower(), r"user|human")
+
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        self.assertEqual(
+                            runner.record_verification(
+                                argparse.Namespace(**common, verified_by="user")
+                            ),
+                            0,
+                        )
+
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["status"], "done")
+                metadata = runner.frontmatter_metadata(
+                    runner.artifact_path(
+                        runner.issue_dir(root, "BUG-1"), "verification"
+                    )
+                )
+                self.assertEqual(metadata["human_verified"], "true")
+
+    def test_deferred_commit_respects_project_deny(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            repo = Path(temp_dir)
+            baseline = self.create_repo(repo)
+            root = repo / ".bugflow/issues"
+            config = self.workflow_config(root)
+            config["execution_policy"]["allow_deferred_user_verification"] = False
+            with working_directory(repo):
+                self.prepare_verified_issue(root, config, deferred_to_user=True)
+                (repo / "target.txt").write_text(
+                    "disallowed deferred commit\n", encoding="utf-8"
+                )
+
+                with mock.patch.object(runner, "load_config", return_value=config):
+                    with self.assertRaises(SystemExit) as raised:
+                        runner.commit_fix(self.commit_args(root))
+
+                self.assertRegex(
+                    str(raised.exception).lower(), r"deferred|user verification|policy"
+                )
+                self.assertEqual(
+                    self.git(repo, "rev-parse", "HEAD").stdout.strip(), baseline
+                )
 
     def test_plan_fix_rejects_boolean_true_instead_of_exact_fingerprint(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

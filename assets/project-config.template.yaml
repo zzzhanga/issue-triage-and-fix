@@ -200,11 +200,18 @@ status_transitions:
 
 execution_policy:
   # Classification never authorizes edits. Keep automation off until the team
-  # intentionally reviews the policy; every fix still needs issue-specific approval.
+  # intentionally reviews the policy; a direct single/batch repair request supplies
+  # the current-run authorization while the runner binds each issue to its own plan.
   auto_fix_allowed: false
   auto_fix_low_risk_frontend: false
+  default_repair_mode: autonomous
   allow_lightweight_verification: true
+  # Assisted mode may create a scoped local commit before the user verifies it.
+  # Remote resolution remains blocked; exported JSON has no native start-fix action.
+  allow_deferred_user_verification: true
   approved_completion_actions:
+    - commit
+  assisted_completion_actions:
     - commit
   max_auto_fix_effort: medium
   require_confirmation_for:
@@ -215,8 +222,9 @@ execution_policy:
     - backend-contract-change
 
 git_policy:
-  # Keep automatic commits off. A manual commit also needs explicit approval,
-  # current structured verification, and an initially empty Git index.
+  # Keep automatic commits off. A plan-bound commit needs an initially empty Git
+  # index. Autonomous mode requires verification first; assisted mode may use the
+  # explicit allow_deferred_user_verification exception.
   auto_commit_after_fix: false
   commit_after_verification_only: true
   stage_policy: touched-files-only
